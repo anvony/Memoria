@@ -1,0 +1,6 @@
+# Machine-learning extras: face recognition + semantic search.
+# Install AFTER requirements.txt. Torch is installed separately by setup.ps1
+# (CPU wheel by default — see README for the GPU upgrade).
+insightface>=0.7.3        # face detection + embeddings (needs MSVC build tools)
+onnxruntime-directml>=1.18 # GPU acceleration on any Windows GPU (DirectML)
+open_clip_torch>=2.24     # CLIP embeddings for "beach sunset" search

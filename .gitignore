@@ -1,0 +1,17 @@
+# Built on the user's machine by setup.cmd — never committed.
+server/.venv/
+
+# ffmpeg is downloaded by setup.cmd (too big for git, and often already on the
+# user's PATH). ExifTool IS committed (redistributable, git-safe).
+server/tools/ffmpeg.exe
+server/tools/ffprobe.exe
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# ML models download on first index into the user's own data dir, never here.
+
+# OS noise
+Thumbs.db
+Desktop.ini

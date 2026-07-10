@@ -1,0 +1,19 @@
+# Core backend — everything the app needs WITHOUT machine learning.
+# The app is fully usable with just these; faces and semantic search
+# activate automatically once requirements-ml.txt is installed too.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pillow>=10.4
+pillow-heif>=0.18       # HEIC/HEIF (iPhone photos)
+imagehash>=4.3          # perceptual hashing for duplicates
+send2trash>=1.8         # Recycle Bin deletes — never permanent
+reverse_geocoder>=1.5.1 # offline GPS -> "City, Region"
+numpy>=1.26
+# External command-line tools (NOT pip packages) live in server/tools/:
+#   - ffmpeg + ffprobe: video posters/metadata. setup.ps1 DOWNLOADS these
+#     (~110 MB, too big to commit) on first run.
+#   - exiftool: the metadata editor's opt-in "also edit the original file"
+#     toggle (the only tool that writes HEIC + MOV losslessly). COMMITTED in the
+#     repo (redistributable). Discovery for all three: $MEMORIA_<TOOL> env var,
+#     then server/tools/<tool>.exe, then PATH (see memoria/tools.py). Absent,
+#     video thumbs / original-edits degrade gracefully.
