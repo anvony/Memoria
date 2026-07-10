@@ -9,8 +9,8 @@ echo.
 echo This prepares Memoria's photo engine on your PC. It needs an
 echo internet connection and a few minutes. You only do this once.
 echo.
-echo (Tip: run "setup.cmd -SkipML" to skip face grouping and
-echo  semantic search for a much smaller, faster install.)
+echo (Faces and semantic search are optional and install later, on
+echo  demand, when you turn them on in the app's Settings.)
 echo.
 
 REM --- 1) Python must be installed and on PATH ---------------------------

@@ -1,6 +1,9 @@
 # Machine-learning extras: face recognition + semantic search.
-# Install AFTER requirements.txt. Torch is installed separately by setup.ps1
-# (CPU wheel by default — see README for the GPU upgrade).
-insightface>=0.7.3        # face detection + embeddings (needs MSVC build tools)
+# Install AFTER requirements.txt. Torch is installed separately (CPU wheel by
+# default — see README for the GPU upgrade). Every package here ships a prebuilt
+# wheel for CPython on Windows, so NO C++ build tools are needed: install with
+# --prefer-binary and pip never compiles anything. In the app these install on
+# demand when you turn on "Faces & semantic search" in Settings.
+insightface>=1.0.1        # face detection + embeddings (pure-Python wheel since 1.0)
 onnxruntime-directml>=1.18 # GPU acceleration on any Windows GPU (DirectML)
 open_clip_torch>=2.24     # CLIP embeddings for "beach sunset" search

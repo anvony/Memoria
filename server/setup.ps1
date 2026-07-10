@@ -15,34 +15,11 @@ python -m venv .venv
 Write-Host "Installing core dependencies..." -ForegroundColor Cyan
 & .\.venv\Scripts\pip.exe install -r requirements.txt
 
-$mlOk = $true
-if (-not $SkipML) {
-    # Faces + semantic search are a bonus, not the core app. insightface compiles
-    # native code and needs the MSVC "Desktop development with C++" build tools,
-    # which most users won't have. So we install it non-fatally: if it fails, the
-    # core app (timeline, albums, places, duplicates, HEIC/video thumbnails) still
-    # works fully -- only face grouping and "beach sunset" search are unavailable.
-    try {
-        Write-Host "Installing torch (CPU build)..." -ForegroundColor Cyan
-        & .\.venv\Scripts\pip.exe install torch --index-url https://download.pytorch.org/whl/cpu
-        if ($LASTEXITCODE -ne 0) { throw "torch install failed" }
-
-        Write-Host "Installing ML dependencies (faces + semantic search)..." -ForegroundColor Cyan
-        Write-Host "  (insightface compiles native code - needs 'Desktop development with C++' build tools)" -ForegroundColor DarkGray
-        & .\.venv\Scripts\pip.exe install -r requirements-ml.txt
-        if ($LASTEXITCODE -ne 0) { throw "ML dependency install failed" }
-    } catch {
-        $mlOk = $false
-        Write-Host ""
-        Write-Host "  Face grouping / semantic search could not be installed:" -ForegroundColor Yellow
-        Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkGray
-        Write-Host "  This usually means the C++ build tools are missing. The rest of" -ForegroundColor DarkGray
-        Write-Host "  Memoria still works. To add these features later, install" -ForegroundColor DarkGray
-        Write-Host "  'Desktop development with C++' from the Visual Studio Build Tools" -ForegroundColor DarkGray
-        Write-Host "  and re-run this setup." -ForegroundColor DarkGray
-        Write-Host ""
-    }
-}
+# Faces + semantic search (torch/insightface/CLIP, ~2 GB) are NOT installed here.
+# They install on demand the first time you turn on "Faces & semantic search" in
+# the app's Settings -- every one of those packages is a prebuilt wheel, so
+# Python stays the ONLY prerequisite and no C++ build tools are ever needed.
+# (-SkipML is accepted for backward compatibility but is now a no-op.)
 
 # External command-line tools (ffmpeg + ExifTool) are native binaries, NOT pip
 # packages, so we download them here into tools\ — that way a first-time user
@@ -121,9 +98,6 @@ if (Test-Path (Join-Path $tools "exiftool.exe")) {
 }
 
 Write-Host ""
-if ($mlOk) {
-    Write-Host "Backend ready (all features)." -ForegroundColor Green
-} else {
-    Write-Host "Backend ready (core features; face grouping / semantic search skipped)." -ForegroundColor Green
-}
+Write-Host "Backend ready." -ForegroundColor Green
+Write-Host "Faces & semantic search install on demand from the app's Settings."
 Write-Host "The Memoria app launches this automatically -- just open Memoria.exe."

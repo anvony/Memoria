@@ -48,21 +48,25 @@ folder). On first run Memoria asks:
   it are a pair — don't separate them, or the app can't find its engine. To move
   Memoria, move the whole folder and re-run `setup.cmd`.
 - **First launch after setup** can take a few seconds while the photo engine
-  starts. Indexing (and the one-time ~1 GB model download for faces/search)
-  happens in the background — you can browse while it works.
+  starts. Indexing happens in the background — you can browse while it works.
 
-### Lighter install (optional)
+### Faces & semantic search (optional — enable it yourself in Settings)
 
-Face grouping and semantic search need extra ~1 GB models and Microsoft's C++
-Build Tools to install. If you don't want them — or setup reports it couldn't
-build them — you can skip them entirely: open a terminal in this folder and run
+Face grouping and "beach sunset" semantic search are **off by default**, and
+`setup.cmd` does **not** install them — that keeps the base install small and
+fast.
 
-```
-setup.cmd -SkipML
-```
+To use them, you must **turn them on manually inside the app**:
 
-Everything else (timeline, albums, map, trips, duplicates, HEIC & video
-thumbnails) works exactly the same.
+1. Open Memoria → **Settings**.
+2. Under **Faces & semantic search**, click **Turn on**.
+3. The first time only, Memoria downloads everything it needs *on demand*
+   (~2–3 GB of packages + models) with a progress bar — leave it running.
+4. When it finishes, run a **rescan** so people and search results appear.
+
+**Python is the only prerequisite** — no Visual Studio / C++ build tools, no
+other software. Everything else (timeline, albums, map, trips, duplicates,
+HEIC & video thumbnails) works fully without ever turning this on.
 
 ### The Windows warning
 

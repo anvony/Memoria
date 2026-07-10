@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -650,35 +651,77 @@ def ml_status() -> dict:
     return _ml_status_dict()
 
 
-def _download_models() -> None:
-    _ml_download.update(downloading=True, progress=0.05, message="Preparing face model…")
+def _run_pip(args: list[str]) -> None:
+    """Run pip inside THIS venv (sys.executable is server/.venv's python, because
+    the app launches the backend as `.venv\\Scripts\\python.exe -m memoria`), so
+    packages land in the same environment the server imports from. --prefer-binary
+    keeps it to prebuilt wheels — every ML dep publishes one for CPython, so no
+    C++ build tools are ever needed."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--prefer-binary", *args],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+        raise RuntimeError(f"pip install failed: {' '.join(tail) or 'unknown error'}")
+
+
+def _prepare_ml() -> None:
+    """Background worker for POST /ml/enable. Two stages, both idempotent:
+      1. install the ML packages if they aren't importable yet (torch CPU wheel +
+         requirements-ml.txt — ~2 GB the first time, skipped on re-enable);
+      2. download the model weights (~1 GB) by warming the face + CLIP models.
+    Progress/message are surfaced by GET /ml/status. `ml_enabled` is only
+    persisted once both stages succeed, so a failed install never leaves the
+    toggle stuck 'on' but broken."""
     try:
+        if not indexer.ml_available():
+            server_dir = Path(__file__).resolve().parent.parent
+            _ml_download.update(
+                progress=0.1,
+                message="Installing PyTorch (CPU)… downloads ~2 GB, first time only.",
+            )
+            # The default PyPI torch is a multi-GB CUDA build; pin the CPU index.
+            _run_pip(["torch", "--index-url", "https://download.pytorch.org/whl/cpu"])
+            _ml_download.update(progress=0.35, message="Installing face + search packages…")
+            _run_pip(["-r", str(server_dir / "requirements-ml.txt")])
+            # site-packages gained new dirs after this process started; let the
+            # import system see them before we try to import.
+            import importlib
+            importlib.invalidate_caches()
+            if not indexer.ml_available():
+                raise RuntimeError(
+                    "packages installed but not importable — please restart Memoria and try again"
+                )
+
+        _ml_download.update(progress=0.55, message="Preparing face model…")
         from . import faces as faces_mod
         faces_mod._get_app()  # downloads insightface buffalo_l on first call
-        _ml_download.update(progress=0.6, message="Preparing search model…")
+        _ml_download.update(progress=0.8, message="Preparing search model…")
         from . import clipsearch
         clipsearch._get_model()  # downloads open_clip weights on first call
-        _ml_download.update(progress=1.0, message="Ready. Run a rescan to detect faces.")
+
+        db.kv_set("ml_enabled", "1")
+        _ml_download.update(progress=1.0, message="Ready. Run a rescan to detect faces and enable search.")
     except Exception as exc:  # keep the message so the UI can show what failed
-        _ml_download.update(message=f"Download failed: {exc}")
+        _ml_download.update(message=f"Setup failed: {exc}")
     finally:
         _ml_download.update(downloading=False)
 
 
 @router.post("/ml/enable")
 def ml_enable() -> dict:
-    """Turn on faces + semantic search: persist the opt-in and download the
-    model weights in the background (progress via GET /ml/status)."""
+    """Turn on faces + semantic search. Installs the ML packages on demand if
+    they aren't present yet, then downloads the model weights — all in the
+    background, so Python is the only thing the user ever has to install
+    themselves (progress via GET /ml/status)."""
     _require_setup()
-    if not indexer.ml_available():
-        raise HTTPException(
-            400,
-            "The ML packages aren't installed. Re-run server/setup.ps1 without "
-            "-SkipML (needs the C++ build tools), then try again.",
-        )
-    db.kv_set("ml_enabled", "1")
     if not _ml_download["downloading"]:
-        threading.Thread(target=_download_models, name="memoria-ml-dl", daemon=True).start()
+        # Flip the flag synchronously so the very first status poll already shows
+        # the progress UI (no race where the worker hasn't started yet).
+        _ml_download.update(downloading=True, progress=0.02, message="Starting…")
+        threading.Thread(target=_prepare_ml, name="memoria-ml-setup", daemon=True).start()
     return _ml_status_dict()
 
 
