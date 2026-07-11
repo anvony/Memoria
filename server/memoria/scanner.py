@@ -102,6 +102,40 @@ def refresh_drives() -> list[int]:
     return came_online
 
 
+def _iter_media(root: Path):
+    """Recurse with os.scandir, yielding (path, stat_result) for media files.
+
+    os.walk uses scandir underneath but throws the DirEntry objects away, so the
+    old code paid a second syscall with os.stat() per file. On Windows the
+    directory entry already carries size/mtime, so entry.stat() reads them for
+    free — halving syscalls on a 100k-file scan (what makes the 'nothing
+    changed' re-scan on startup snappy). Hidden/system dirs (recycle bin,
+    thumbnail caches) are skipped by name, same as before.
+    """
+    stack = [str(root)]
+    while stack:
+        current = stack.pop()
+        try:
+            scan = os.scandir(current)
+        except OSError:
+            continue
+        with scan:
+            for entry in scan:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if not entry.name.startswith((".", "$", "@")):
+                            stack.append(entry.path)
+                        continue
+                except OSError:
+                    continue
+                if os.path.splitext(entry.name)[1].lower() not in MEDIA_EXTS:
+                    continue
+                try:
+                    yield entry.path, entry.stat()
+                except OSError:
+                    continue
+
+
 def scan_folder(folder_id: int) -> list[int]:
     """Sync the files table with disk. Returns file ids needing (re)indexing."""
     conn = db.get_conn()
@@ -125,39 +159,29 @@ def scan_folder(folder_id: int) -> list[int]:
     seen: set[str] = set()
 
     with db.tx() as c:
-        for dirpath, dirnames, filenames in os.walk(root):
-            # skip hidden/system dirs (recycle bin, thumbnail caches…)
-            dirnames[:] = [d for d in dirnames if not d.startswith((".", "$", "@"))]
-            for name in filenames:
-                if Path(name).suffix.lower() not in MEDIA_EXTS:
-                    continue
-                fpath = str(Path(dirpath) / name)
-                seen.add(fpath)
-                try:
-                    st = os.stat(fpath)
-                except OSError:
-                    continue
-                row = known.get(fpath)
-                if row and row["size"] == st.st_size and abs(row["mtime"] - st.st_mtime) < 1:
-                    if row["status"] != "ok":
-                        c.execute("UPDATE files SET status = 'ok' WHERE id = ?", (row["id"],))
-                    if row["content_hash"] is None:
-                        todo.append(row["id"])  # scanned before but never indexed
-                    continue
-                if row:
-                    c.execute(
-                        "UPDATE files SET size = ?, mtime = ?, content_hash = NULL, status = 'ok' "
-                        "WHERE id = ?",
-                        (st.st_size, st.st_mtime, row["id"]),
-                    )
-                    todo.append(row["id"])
-                else:
-                    cur = c.execute(
-                        "INSERT INTO files (folder_id, drive_id, path, size, mtime) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (folder_id, drive_id, fpath, st.st_size, st.st_mtime),
-                    )
-                    todo.append(cur.lastrowid)
+        for fpath, st in _iter_media(root):
+            seen.add(fpath)
+            row = known.get(fpath)
+            if row and row["size"] == st.st_size and abs(row["mtime"] - st.st_mtime) < 1:
+                if row["status"] != "ok":
+                    c.execute("UPDATE files SET status = 'ok' WHERE id = ?", (row["id"],))
+                if row["content_hash"] is None:
+                    todo.append(row["id"])  # scanned before but never indexed
+                continue
+            if row:
+                c.execute(
+                    "UPDATE files SET size = ?, mtime = ?, content_hash = NULL, status = 'ok' "
+                    "WHERE id = ?",
+                    (st.st_size, st.st_mtime, row["id"]),
+                )
+                todo.append(row["id"])
+            else:
+                cur = c.execute(
+                    "INSERT INTO files (folder_id, drive_id, path, size, mtime) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (folder_id, drive_id, fpath, st.st_size, st.st_mtime),
+                )
+                todo.append(cur.lastrowid)
 
         # files that vanished from disk
         for fpath, row in known.items():

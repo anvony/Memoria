@@ -28,7 +28,7 @@ from . import (
     scanner, trips,
 )
 from .models import (
-    Album, DuplicateFile, DuplicateGroup, IndexStatus, MlStatus, Person, Photo,
+    Album, DuplicateFile, DuplicateGroup, IndexFailure, IndexStatus, MlStatus, Person, Photo,
     PhotoFace, Place, SetupState, SourceFolder, StorageInfo, Trip,
 )
 
@@ -97,6 +97,12 @@ def _photo_rows_to_models(rows) -> list[Photo]:
     ):
         size_map[r["content_hash"]] = r["s"]
 
+    # Which stills own a paired Live Photo clip — one query, not one per row.
+    live_stills = {
+        r["live_of"]
+        for r in conn.execute("SELECT DISTINCT live_of FROM photos WHERE live_of IS NOT NULL")
+    }
+
     out = []
     for r in rows:
         h = r["hash"]
@@ -118,6 +124,7 @@ def _photo_rows_to_models(rows) -> list[Photo]:
             kind=r["kind"],
             duration=r["duration"],
             size_bytes=size_map.get(h),
+            has_live=h in live_stills,
         ))
     return out
 
@@ -1022,6 +1029,18 @@ def remove_trip_photos(trip_id: str, body: PhotoIdsBody) -> dict:
     return {"ok": True}
 
 
+@router.post("/trips/{trip_id}/delete")
+def delete_trip(trip_id: str) -> dict:
+    """Delete an auto-detected trip so it stops appearing on the Trips screen.
+    Like removals, a trip is re-derived every request, so 'delete' means record
+    the id in trip_hidden and subtract it back out in detect_trips. The photos
+    themselves are untouched — they just no longer group into this trip."""
+    _require_setup()
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO trip_hidden (trip_id) VALUES (?)", (trip_id,))
+    return {"ok": True}
+
+
 class TripEditBody(BaseModel):
     name: str | None = None
     place: str | None = None
@@ -1449,13 +1468,14 @@ def list_folders() -> list[SourceFolder]:
     _require_setup()
     rows = db.get_conn().execute(
         "SELECT fo.*, d.label AS drive_label, d.online, "
-        "  (SELECT COUNT(*) FROM files WHERE folder_id = fo.id AND status = 'ok') AS n "
+        "  (SELECT COUNT(*) FROM files WHERE folder_id = fo.id AND status = 'ok') AS n, "
+        "  (SELECT COUNT(*) FROM failed_files WHERE folder_id = fo.id) AS failed "
         "FROM folders fo LEFT JOIN drives d ON d.id = fo.drive_id"
     ).fetchall()
     return [
         SourceFolder(
             id=r["id"], path=r["path"], drive_label=r["drive_label"],
-            online=bool(r["online"]), file_count=r["n"],
+            online=bool(r["online"]), file_count=r["n"], failed_count=r["failed"],
         )
         for r in rows
     ]
@@ -1472,7 +1492,10 @@ def add_folder(body: FolderBody) -> dict:
         folder_id = scanner.add_folder(body.path)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    indexer.start()
+    # request_rescan (not start): if a pass is already running, the new folder
+    # is appended to the running pipeline's work instead of being ignored until
+    # the next manual rescan.
+    indexer.request_rescan()
     return {"ok": True, "id": folder_id}
 
 
@@ -1489,13 +1512,35 @@ def refresh_folders() -> list[SourceFolder]:
     index anything on a drive that just came back."""
     _require_setup()
     if scanner.refresh_drives():
-        indexer.start()
+        indexer.request_rescan()
     return list_folders()
 
 
 @router.get("/index/status")
 def index_status() -> IndexStatus:
-    return IndexStatus(**indexer.status, ml_available=indexer.ml_available())
+    failed = 0
+    if _configured():
+        failed = db.get_conn().execute("SELECT COUNT(*) AS n FROM failed_files").fetchone()["n"]
+    return IndexStatus(
+        **indexer.status, ml_available=indexer.ml_available(), failed_count=failed,
+    )
+
+
+@router.get("/index/failures")
+def index_failures() -> list[IndexFailure]:
+    """Files the indexer couldn't process, newest first — the reason a photo is
+    missing from the library, surfaced instead of buried in the console."""
+    _require_setup()
+    rows = db.get_conn().execute(
+        "SELECT path, folder_id, error, failed_at FROM failed_files ORDER BY failed_at DESC"
+    ).fetchall()
+    return [
+        IndexFailure(
+            path=r["path"], filename=Path(r["path"]).name, folder_id=r["folder_id"],
+            error=r["error"], failed_at=r["failed_at"],
+        )
+        for r in rows
+    ]
 
 
 @router.post("/index/start")

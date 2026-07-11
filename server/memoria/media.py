@@ -15,6 +15,7 @@ Performance-relevant choices:
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -50,6 +51,17 @@ def content_hash(path: Path, kind: str) -> str:
     return h.hexdigest()
 
 
+def hash_bytes(data: bytes) -> str:
+    """Identity hash of an image already read into memory. Identical to
+    content_hash(path, "photo") — both are BLAKE2b over the whole file — so
+    the indexer can read a photo ONCE (hash + decode from the same bytes)
+    instead of reading it off disk twice. Videos keep the head+tail hash in
+    content_hash: slurping a 2 GB file into RAM would be worse, not better."""
+    h = hashlib.blake2b(digest_size=20)
+    h.update(data)
+    return h.hexdigest()
+
+
 def kind_of(path: Path) -> str | None:
     ext = path.suffix.lower()
     if ext in IMAGE_EXTS:
@@ -72,8 +84,12 @@ def _mtime_iso(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
 
 
-def read_image_meta(path: Path) -> dict:
-    """date_taken, width, height, camera, lat, lng — from EXIF where possible."""
+def read_image_meta(path: Path, *, data: bytes | None = None) -> dict:
+    """date_taken, width, height, camera, lat, lng — from EXIF where possible.
+
+    `data`, when given, is the file already in memory (see hash_bytes): the
+    image is decoded from those bytes instead of re-read off disk.
+    """
     meta: dict = {
         "date_taken": _mtime_iso(path),
         "width": 0,
@@ -82,12 +98,20 @@ def read_image_meta(path: Path) -> dict:
         "lat": None,
         "lng": None,
     }
-    with Image.open(path) as img:
-        # Orientation flag can swap logical width/height
-        oriented = ImageOps.exif_transpose(img)
-        meta["width"], meta["height"] = oriented.size
-
+    with Image.open(io.BytesIO(data) if data is not None else path) as img:
+        # Logical dimensions = raw pixel size, swapped when EXIF orientation
+        # says the image is rotated a quarter turn (5/6/7/8). We deliberately
+        # do NOT exif_transpose here just to read the size: that physically
+        # rotates pixels and forces a FULL-resolution decode of every photo
+        # (Image.open is otherwise lazy — img.size is free). Nearly every phone
+        # photo carries an orientation tag, so that decode was pure waste, paid
+        # again in make_image_thumbs. Reading the tag costs nothing.
         exif = img.getexif()
+        w, h = img.size
+        if exif.get(0x0112) in (5, 6, 7, 8):  # rotated 90°/270°
+            w, h = h, w
+        meta["width"], meta["height"] = w, h
+
         if exif:
             make = (exif.get(0x010F) or "").strip()
             model = (exif.get(0x0110) or "").strip()
@@ -207,10 +231,22 @@ def thumb_paths(thumbs_dir: Path, photo_hash: str) -> tuple[Path, Path]:
     return shard / f"{photo_hash}_t.webp", shard / f"{photo_hash}_p.webp"
 
 
-def make_image_thumbs(src: Path, thumbs_dir: Path, photo_hash: str) -> None:
+def make_image_thumbs(
+    src: Path, thumbs_dir: Path, photo_hash: str, *, data: bytes | None = None
+) -> None:
+    """`data`, when given, is the file already in memory — decoded from those
+    bytes instead of re-read off disk (the indexer hashes and decodes the same
+    read)."""
     thumb, preview = thumb_paths(thumbs_dir, photo_hash)
     thumb.parent.mkdir(parents=True, exist_ok=True)
-    with Image.open(src) as img:
+    with Image.open(io.BytesIO(data) if data is not None else src) as img:
+        # draft() lets the JPEG decoder emit a downscaled image directly (1/2,
+        # 1/4, 1/8 via the DCT), so a 48 MP source is decoded at a fraction of
+        # full resolution. It MUST come before any pixel access, so before
+        # exif_transpose — the old order (transpose first) forced a full decode
+        # and defeated it. No-op for non-JPEG formats. LANCZOS from the drafted
+        # size still yields a crisp thumbnail.
+        img.draft("RGB", (1600, 1600))
         img = ImageOps.exif_transpose(img)
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")

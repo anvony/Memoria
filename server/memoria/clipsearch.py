@@ -93,8 +93,8 @@ def process_pending(status: dict) -> None:
                 batch.append((row["hash"], preprocess(img.convert("RGB"))))
         except OSError:
             continue
-        if len(batch) >= 16:
-            flush()
+        if len(batch) >= 32:  # bigger batch amortises per-call overhead on CPU;
+            flush()           # 224x224 inputs make the memory cost trivial
     flush()
     status.update(done=len(pending), current=None)
 

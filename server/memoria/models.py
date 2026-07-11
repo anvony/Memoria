@@ -34,6 +34,7 @@ class Photo(ApiModel):
     kind: str = "photo"
     duration: float | None = None
     size_bytes: int | None = None   # largest on-disk copy, for the info panel
+    has_live: bool = False          # a Live Photo: a companion MOV is paired to it
 
 
 class Person(ApiModel):
@@ -99,6 +100,7 @@ class SourceFolder(ApiModel):
     drive_label: str | None
     online: bool
     file_count: int
+    failed_count: int = 0   # files in this folder the indexer couldn't process
 
 
 class IndexStatus(ApiModel):
@@ -108,6 +110,15 @@ class IndexStatus(ApiModel):
     current: str | None   # file currently being processed
     error: str | None
     ml_available: bool    # are the faces/CLIP deps installed?
+    failed_count: int = 0  # files that couldn't be indexed (see /index/failures)
+
+
+class IndexFailure(ApiModel):
+    path: str
+    filename: str
+    folder_id: int | None
+    error: str
+    failed_at: str
 
 
 class SetupState(ApiModel):

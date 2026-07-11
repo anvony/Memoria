@@ -77,6 +77,10 @@ def detect_trips() -> list[dict]:
     for r in conn.execute("SELECT trip_id, photo_hash FROM trip_excludes"):
         excludes[r["trip_id"]].add(r["photo_hash"])
 
+    # Whole trips the user deleted — auto-detection would otherwise re-surface
+    # them on every scan, so skip any run whose id was hidden.
+    hidden_trips = {r["trip_id"] for r in conn.execute("SELECT trip_id FROM trip_hidden")}
+
     # Which days were "away days"?
     day_away: dict[str, list] = defaultdict(list)   # day -> away gps rows
     day_all: dict[str, list] = defaultdict(list)    # day -> all rows
@@ -99,6 +103,9 @@ def detect_trips() -> list[dict]:
         )
         place = places.most_common(1)[0][0] if places else "Unknown"
         trip_id = f"trip-{run[0]}-{_slug(place)}"
+        if trip_id in hidden_trips:   # user deleted this whole trip
+            run.clear()
+            return
         # Subtract any photos the user explicitly removed from this trip.
         removed = excludes.get(trip_id)
         if removed:

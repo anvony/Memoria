@@ -128,6 +128,17 @@ CREATE TABLE IF NOT EXISTS trip_excludes (  -- photos the user removed from an
   photo_hash TEXT NOT NULL,        -- removal has to be remembered separately)
   PRIMARY KEY (trip_id, photo_hash)
 );
+
+CREATE TABLE IF NOT EXISTS trip_hidden (   -- whole trips the user deleted; trips
+  trip_id    TEXT PRIMARY KEY           -- are auto-derived, so a deletion is only
+);                                       -- remembered here and subtracted each scan
+
+CREATE TABLE IF NOT EXISTS failed_files (  -- files the indexer couldn't process,
+  path       TEXT PRIMARY KEY,     -- so a user can see WHICH photos didn't make
+  folder_id  INTEGER,              -- it in and why, instead of only a console
+  error      TEXT NOT NULL,        -- line. Cleared automatically once the file
+  failed_at  TEXT NOT NULL         -- indexes successfully on a later run.
+);
 """
 
 _local = threading.local()

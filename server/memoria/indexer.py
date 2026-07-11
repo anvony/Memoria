@@ -20,13 +20,25 @@ from __future__ import annotations
 
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config, db, geocode, media, scanner
 
+# Stage 2 (hash + EXIF + thumbnails) runs on a pool of worker threads. Plain
+# threads win here because everything expensive releases the GIL: Pillow
+# decode/encode is C, blake2b releases it for large buffers, ffmpeg/ffprobe are
+# subprocesses, file reads are I/O waits. 4 is deliberate — on a spinning HDD or
+# USB drive, parallel reads seek-thrash, so we don't go higher.
+_INDEX_WORKERS = 4
+
 _lock = threading.Lock()
 _thread: threading.Thread | None = None
+# Set when a folder is added / a drive reconnects while a pass is already
+# running, so the running pipeline does one more full pass instead of leaving
+# the new folder unindexed until a manual rescan.
+_rescan = threading.Event()
 
 status: dict = {
     "state": "idle",
@@ -64,6 +76,15 @@ def start() -> bool:
         return True
 
 
+def request_rescan() -> None:
+    """Queue an indexing pass after a folder is added or a drive reconnects.
+    If a pass is already running, this flag makes its pipeline do one more full
+    pass (so the new folder is picked up automatically, queued behind the work
+    already in flight); otherwise a fresh pass starts."""
+    _rescan.set()
+    start()
+
+
 def start_rebuild_thumbs() -> bool:
     """Regenerate every thumbnail from the originals — used after 'clear cache'.
     Runs on the same single worker thread as indexing."""
@@ -74,6 +95,20 @@ def start_rebuild_thumbs() -> bool:
         _thread = threading.Thread(target=_rebuild_thumbs, name="memoria-thumbs", daemon=True)
         _thread.start()
         return True
+
+
+def _rebuild_one(r):
+    """Pool worker for 'clear cache' regen. Touches only the filesystem (no DB
+    writes), so a plain shared thumbs dir is safe across threads."""
+    src = Path(r["path"])
+    try:
+        if r["kind"] == "photo":
+            media.make_image_thumbs(src, config.thumbs_dir(), r["hash"])
+        else:
+            media.make_video_thumbs(src, config.thumbs_dir(), r["hash"], r["duration"])
+    except Exception as exc:
+        print(f"[thumbs] regen failed for {src}: {exc}")
+    return r
 
 
 def _rebuild_thumbs() -> None:
@@ -87,16 +122,11 @@ def _rebuild_thumbs() -> None:
         ).fetchall()
         rows = [r for r in rows if r["path"]]
         _set("indexing", total=len(rows), done=0)
-        for i, r in enumerate(rows):
-            status.update(done=i, current=Path(r["path"]).name)
-            src = Path(r["path"])
-            try:
-                if r["kind"] == "photo":
-                    media.make_image_thumbs(src, config.thumbs_dir(), r["hash"])
-                else:
-                    media.make_video_thumbs(src, config.thumbs_dir(), r["hash"], r["duration"])
-            except Exception as exc:
-                print(f"[thumbs] regen failed for {src}: {exc}")
+        done = 0
+        with ThreadPoolExecutor(max_workers=_INDEX_WORKERS) as pool:
+            for r in as_completed([pool.submit(_rebuild_one, row) for row in rows]):
+                done += 1
+                status.update(done=done, current=Path(r.result()["path"]).name)
         status.update(done=len(rows), current=None)
         _set("done")
     except Exception as exc:
@@ -110,47 +140,81 @@ def _set(state: str, **kw) -> None:
     status.update({"state": state, **kw})
 
 
+def _index_todo(todo: list[int]) -> None:
+    """Run stage 2 (hash + EXIF + thumbnails) over a batch of file ids on the
+    worker pool, updating progress. One broken file is recorded, never fatal."""
+    _set("indexing", total=len(todo), done=0)
+    done = 0
+    with ThreadPoolExecutor(max_workers=_INDEX_WORKERS) as pool:
+        futures = [pool.submit(_index_one, fid) for fid in todo]
+        for fut in as_completed(futures):
+            done += 1
+            row, exc = fut.result()
+            if row is None:
+                status.update(done=done)
+                continue
+            # `current` is best-effort under parallelism — it just shows one
+            # of the files in flight, not a strict sequence.
+            status.update(done=done, current=Path(row["path"]).name)
+            if exc is not None:  # one broken file must not kill the run
+                _record_failure(row, exc)
+                print(f"[indexer] failed on {row['path']}: {exc}")
+    status.update(done=len(todo), current=None)
+
+
 def _run() -> None:
     try:
-        _set("scanning", total=0, done=0, current=None, error=None)
         geocode.warm_up()
 
-        conn = db.get_conn()
-        folder_ids = [r["id"] for r in conn.execute("SELECT id FROM folders")]
-        todo: list[int] = []
-        for fid in folder_ids:
-            todo.extend(scanner.scan_folder(fid))
+        # Outer loop: re-run the whole pipeline if a folder was queued (_rescan)
+        # while it was busy — covers a folder added during faces/CLIP/backup,
+        # after the scan loop below has already finished.
+        while True:
+            _rescan.clear()
 
-        _set("indexing", total=len(todo), done=0)
-        for i, file_id in enumerate(todo):
-            row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
-            if row is None:
-                continue
-            status.update(done=i, current=Path(row["path"]).name)
+            # Scan + index in repeated passes. scan_folder is incremental (it
+            # returns only files still missing a content_hash) and re-reads the
+            # folders table every pass, so a folder added WHILE indexing is
+            # running is picked up on the next pass — queued behind the files
+            # already in flight — instead of waiting for a manual rescan.
+            while True:
+                _set("scanning", total=0, done=0, current=None, error=None)
+                conn = db.get_conn()
+                folder_ids = [r["id"] for r in conn.execute("SELECT id FROM folders")]
+                todo: list[int] = []
+                for fid in folder_ids:
+                    todo.extend(scanner.scan_folder(fid))
+                if not todo:
+                    break
+                _index_todo(todo)
+                _clear_resolved_failures()
+
+            _clear_resolved_failures()
+            _pair_live_photos()
+            _compute_phashes()
+
+            if ml_available() and ml_enabled():
+                from . import faces as faces_mod
+                _set("faces")
+                faces_mod.process_pending(status)
+                from . import clipsearch
+                _set("clip")
+                clipsearch.process_pending(status)
+
+            # Autosave the catalogue after every completed sync (scope: "after
+            # each sync"). Cheap — the DB is small — and keeps a rolling safety
+            # net.
             try:
-                _index_file(row)
-            except Exception as exc:  # one broken file must not kill the run
-                print(f"[indexer] failed on {row['path']}: {exc}")
-        status.update(done=len(todo), current=None)
+                from . import backup
+                backup.make_backup(auto=True)
+            except Exception as exc:
+                print(f"[indexer] autosave failed: {exc}")
 
-        _pair_live_photos()
-        _compute_phashes()
-
-        if ml_available() and ml_enabled():
-            from . import faces as faces_mod
-            _set("faces")
-            faces_mod.process_pending(status)
-            from . import clipsearch
-            _set("clip")
-            clipsearch.process_pending(status)
-
-        # Autosave the catalogue after every completed sync (scope: "after each
-        # sync"). Cheap — the DB is small — and keeps a rolling safety net.
-        try:
-            from . import backup
-            backup.make_backup(auto=True)
-        except Exception as exc:
-            print(f"[indexer] autosave failed: {exc}")
+            # A folder queued mid-pipeline (after the scan loop drained) makes us
+            # run the whole thing once more; everything is incremental so a pass
+            # with nothing new is cheap.
+            if not _rescan.is_set():
+                break
 
         _set("done")
     except Exception as exc:
@@ -165,38 +229,90 @@ def _index_file(row) -> None:
     kind = media.kind_of(path)
     if kind is None:
         return
-    file_hash = media.content_hash(path, kind)
+
+    # Read a photo off disk ONCE: hash and decode share the same bytes, so a
+    # big archive on a slow HDD/USB isn't read twice per file. Videos keep the
+    # head+tail hash from the path — slurping a multi-GB file would be worse.
+    data = path.read_bytes() if kind == "photo" else None
+    file_hash = media.hash_bytes(data) if data is not None else media.content_hash(path, kind)
 
     conn = db.get_conn()
     exists = conn.execute("SELECT hash FROM photos WHERE hash = ?", (file_hash,)).fetchone()
+
+    if not exists:
+        if kind == "photo":
+            meta = media.read_image_meta(path, data=data)
+        else:
+            meta = media.read_video_meta(path)
+
+        place = None
+        if meta["lat"] is not None and meta["lng"] is not None:
+            place = geocode.place_name(meta["lat"], meta["lng"])
+
+        if kind == "photo":
+            media.make_image_thumbs(path, config.thumbs_dir(), file_hash, data=data)
+        else:
+            media.make_video_thumbs(path, config.thumbs_dir(), file_hash, meta.get("duration"))
+
+        with db.tx() as c:
+            # INSERT OR IGNORE, not INSERT: under the parallel worker pool two
+            # files with identical content can both pass the SELECT above before
+            # either inserts. hash is the PK, so the second one is a no-op.
+            c.execute(
+                "INSERT OR IGNORE INTO photos (hash, kind, filename, date_taken, width, height, "
+                "  camera, lat, lng, place, duration, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    file_hash, kind, path.name, meta["date_taken"],
+                    meta["width"] or 0, meta["height"] or 0, meta["camera"],
+                    meta["lat"], meta["lng"], place, meta.get("duration"),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    # Mark the file hashed ONLY now, at the end. If anything above raised, the
+    # file keeps content_hash = NULL, so the next scan retries it (and the
+    # failure is recorded in failed_files) — the old code set the hash first,
+    # which permanently skipped a file that failed thumbnailing, with no photo
+    # row and no way to know.
     with db.tx() as c:
         c.execute("UPDATE files SET content_hash = ? WHERE id = ?", (file_hash, row["id"]))
-    if exists:
-        return  # same content already indexed (a duplicate file) — nothing to redo
 
-    meta = media.read_image_meta(path) if kind == "photo" else media.read_video_meta(path)
 
-    place = None
-    if meta["lat"] is not None and meta["lng"] is not None:
-        place = geocode.place_name(meta["lat"], meta["lng"])
+def _index_one(file_id: int):
+    """Pool worker: (re)read the file row on this thread's own connection, index
+    it, and hand back (row, exception|None) for the main thread to tally. Never
+    raises — a broken file must not kill the pool."""
+    row = db.get_conn().execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+    if row is None:
+        return None, None
+    try:
+        _index_file(row)
+        return row, None
+    except Exception as exc:
+        return row, exc
 
-    if kind == "photo":
-        media.make_image_thumbs(path, config.thumbs_dir(), file_hash)
-    else:
-        media.make_video_thumbs(path, config.thumbs_dir(), file_hash, meta.get("duration"))
 
+def _record_failure(row, exc: Exception) -> None:
     with db.tx() as c:
         c.execute(
-            "INSERT INTO photos (hash, kind, filename, date_taken, width, height, camera, "
-            "  lat, lng, place, duration, indexed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                file_hash, kind, path.name, meta["date_taken"],
-                meta["width"] or 0, meta["height"] or 0, meta["camera"],
-                meta["lat"], meta["lng"], place, meta.get("duration"),
-                datetime.now(timezone.utc).isoformat(),
-            ),
+            "INSERT INTO failed_files (path, folder_id, error, failed_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET "
+            "  folder_id = excluded.folder_id, error = excluded.error, failed_at = excluded.failed_at",
+            (row["path"], row["folder_id"], str(exc)[:500],
+             datetime.now(timezone.utc).isoformat()),
         )
+
+
+def _clear_resolved_failures() -> None:
+    """Drop failure records for files that have since indexed OK (content_hash
+    set) or that no longer exist in the files table."""
+    with db.tx() as c:
+        c.execute(
+            "DELETE FROM failed_files WHERE path IN "
+            "  (SELECT path FROM files WHERE content_hash IS NOT NULL)"
+        )
+        c.execute("DELETE FROM failed_files WHERE path NOT IN (SELECT path FROM files)")
 
 
 def _pair_live_photos() -> None:
@@ -268,22 +384,46 @@ def _pair_live_photos() -> None:
             c.execute("UPDATE photos SET live_of = ? WHERE hash = ?", (still_hash, video_hash))
 
 
-def _compute_phashes() -> None:
-    """Perceptual hash from the 400px thumbnail (not the original: 100x faster
-    and pHash doesn't need more pixels than that)."""
+def _phash_one(photo_hash: str):
+    """Pool worker: perceptual hash from the 400px thumbnail. Returns
+    (phash, hash) or None. Read-only on the filesystem, no DB access."""
     import imagehash
     from PIL import Image
 
-    conn = db.get_conn()
-    pending = conn.execute("SELECT hash FROM photos WHERE phash IS NULL").fetchall()
-    for row in pending:
-        thumb, _ = media.thumb_paths(config.thumbs_dir(), row["hash"])
-        if not thumb.exists():
-            continue
-        try:
-            with Image.open(thumb) as img:
-                ph = str(imagehash.phash(img))
-        except OSError:
-            continue
+    thumb, _ = media.thumb_paths(config.thumbs_dir(), photo_hash)
+    if not thumb.exists():
+        return None
+    try:
+        with Image.open(thumb) as img:
+            return (str(imagehash.phash(img)), photo_hash)
+    except OSError:
+        return None
+
+
+def _compute_phashes() -> None:
+    """Perceptual hashes for the duplicates screen — from the 400px thumbnail
+    (not the original: 100x faster and pHash doesn't need more pixels)."""
+    pending = db.get_conn().execute("SELECT hash FROM photos WHERE phash IS NULL").fetchall()
+    if not pending:
+        return
+    # Commit in batches: a transaction per photo means 50k WAL journal writes on
+    # a big library. ~200 rows per commit still leaves each committed batch as
+    # resume progress if the run is interrupted, without the per-row overhead.
+    batch: list[tuple[str, str]] = []  # (phash, hash)
+
+    def flush() -> None:
+        if not batch:
+            return
         with db.tx() as c:
-            c.execute("UPDATE photos SET phash = ? WHERE hash = ?", (ph, row["hash"]))
+            c.executemany("UPDATE photos SET phash = ? WHERE hash = ?", batch)
+        batch.clear()
+
+    with ThreadPoolExecutor(max_workers=_INDEX_WORKERS) as pool:
+        for fut in as_completed([pool.submit(_phash_one, r["hash"]) for r in pending]):
+            res = fut.result()
+            if res is None:
+                continue
+            batch.append(res)
+            if len(batch) >= 200:
+                flush()
+    flush()
