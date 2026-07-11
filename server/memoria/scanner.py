@@ -50,10 +50,40 @@ def ensure_drive(path: Path) -> int:
     return row["id"]
 
 
+def _is_within(inner: Path, outer: Path) -> bool:
+    """True if `inner` is `outer` or lives underneath it (case-insensitive on
+    Windows). Used to resolve overlapping source folders."""
+    try:
+        inner.relative_to(outer)
+        return True
+    except ValueError:
+        return False
+
+
+def _norm(path: Path) -> Path:
+    return Path(os.path.normcase(os.path.normpath(str(path))))
+
+
 def add_folder(path: str) -> int:
     folder = Path(path)
     if not folder.is_dir():
         raise ValueError(f"Not a folder: {path}")
+    # Overlapping source folders would index the same files twice, and because
+    # files.path is globally unique the second scan collides and kills the run.
+    # So a source folder and its parent can never both be in the list — the
+    # broader folder always wins. (Paths are normcased so casing/separators
+    # can't slip an overlap past this.)
+    norm = _norm(folder)
+    conn = db.get_conn()
+    absorb: list[int] = []  # existing child folders this new folder supersedes
+    for row in conn.execute("SELECT id, path FROM folders"):
+        other = _norm(Path(row["path"]))
+        if other == norm:
+            return row["id"]  # exact re-add (maybe different casing): reuse it
+        if _is_within(norm, other):
+            return row["id"]  # already covered by a broader folder → nothing to add
+        if _is_within(other, norm):
+            absorb.append(row["id"])  # this folder is their parent → fold them in
     drive_id = ensure_drive(folder)
     with db.tx() as conn:
         conn.execute(
@@ -61,8 +91,22 @@ def add_folder(path: str) -> int:
             "ON CONFLICT(path) DO UPDATE SET drive_id = excluded.drive_id",
             (str(folder), drive_id),
         )
-        row = conn.execute("SELECT id FROM folders WHERE path = ?", (str(folder),)).fetchone()
-    return row["id"]
+        fid = conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (str(folder),)
+        ).fetchone()["id"]
+        # Re-parent each superseded child folder's files onto this new parent,
+        # then drop the now-redundant child folder row. This is metadata only —
+        # the files keep their content_hash, thumbnails, favorites and album
+        # membership (identity is the content hash, not the path), so absorbing
+        # a child costs zero re-indexing. The child's files are already inside
+        # this folder on disk, so the parent's own scan would reach them anyway.
+        for cid in absorb:
+            conn.execute(
+                "UPDATE files SET folder_id = ?, drive_id = ? WHERE folder_id = ?",
+                (fid, drive_id, cid),
+            )
+            conn.execute("DELETE FROM folders WHERE id = ?", (cid,))
+    return fid
 
 
 def remove_folder(folder_id: int) -> None:
@@ -176,12 +220,18 @@ def scan_folder(folder_id: int) -> list[int]:
                 )
                 todo.append(row["id"])
             else:
+                # ON CONFLICT DO NOTHING: files.path is globally unique, so if a
+                # different (overlapping) source folder already owns this exact
+                # path the insert would otherwise raise IntegrityError and kill
+                # the whole index run. The file is already tracked — and indexed
+                # once — under that folder, so leave it there and skip it here.
                 cur = c.execute(
                     "INSERT INTO files (folder_id, drive_id, path, size, mtime) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO NOTHING",
                     (folder_id, drive_id, fpath, st.st_size, st.st_mtime),
                 )
-                todo.append(cur.lastrowid)
+                if cur.rowcount:
+                    todo.append(cur.lastrowid)
 
         # files that vanished from disk
         for fpath, row in known.items():
