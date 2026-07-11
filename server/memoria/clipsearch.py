@@ -28,6 +28,15 @@ _model = None
 _preprocess = None
 _tokenizer = None
 
+# M4: the visual encoder runs on the DirectML GPU through ONNX Runtime (the same
+# onnxruntime-directml the face stage uses — no new dependency). None until built;
+# _onnx_failed latches so we don't retry a broken export every flush and just use
+# the torch CPU path. The TEXT encoder stays on torch CPU: it runs once per search
+# query, not per photo, so it isn't worth converting.
+_ONNX_VISUAL_FILE = "visual_vitb32.onnx"
+_onnx_session = None
+_onnx_failed = False
+
 # In-memory matrix cache, invalidated whenever new embeddings are written
 _matrix: np.ndarray | None = None
 _hashes: list[str] = []
@@ -46,6 +55,61 @@ def _get_model():
             _model.eval()
             _tokenizer = open_clip.get_tokenizer("ViT-B-32")
     return _model, _preprocess, _tokenizer
+
+
+def _export_visual_onnx(path) -> None:
+    """One-time export of open_clip's visual tower to ONNX (fixed 224x224 input,
+    a dynamic batch axis), cached in the data dir next to the weights — same
+    'build once, reuse forever' pattern as the model download. encode_image(x) is
+    just self.visual(x), so the ONNX output equals the torch encoder's (we
+    L2-normalize either way), keeping new embeddings comparable to any already
+    stored by the torch path."""
+    import torch
+
+    model, _, _ = _get_model()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dummy = torch.zeros(1, 3, 224, 224, dtype=torch.float32)
+    tmp = path.with_name(path.name + ".tmp")
+    with torch.no_grad():
+        torch.onnx.export(
+            model.visual, dummy, str(tmp),
+            input_names=["pixel_values"], output_names=["image_embeds"],
+            dynamic_axes={"pixel_values": {0: "batch"}, "image_embeds": {0: "batch"}},
+            opset_version=17,
+        )
+    tmp.replace(path)  # atomic: a crash mid-export never leaves a half-written file
+
+
+def _get_onnx_visual():
+    """ONNX Runtime session for the CLIP visual encoder on the DirectML GPU (M4).
+    Returns None — and the caller falls back to the torch CPU path — whenever
+    DirectML isn't available or the export/session fails, so the CLIP stage is
+    never broken by this, only accelerated when it can be. `_onnx_failed` latches
+    so a failure isn't re-attempted on every batch."""
+    global _onnx_session, _onnx_failed
+    if _onnx_session is not None:
+        return _onnx_session
+    if _onnx_failed:
+        return None
+    with _lock:
+        if _onnx_session is None and not _onnx_failed:
+            try:
+                import onnxruntime as ort
+                if "DmlExecutionProvider" not in ort.get_available_providers():
+                    _onnx_failed = True  # CPU-only box: the torch path is equivalent
+                    return None
+                path = config.models_dir() / "clip" / _ONNX_VISUAL_FILE
+                if not path.exists():
+                    _export_visual_onnx(path)
+                _onnx_session = ort.InferenceSession(
+                    str(path),
+                    providers=["DmlExecutionProvider", "CPUExecutionProvider"],
+                )
+            except Exception as exc:
+                print(f"[clip] GPU (ONNX/DirectML) unavailable, using CPU: {exc}")
+                _onnx_failed = True
+                return None
+    return _onnx_session
 
 
 def process_pending(status: dict) -> None:
@@ -67,15 +131,23 @@ def process_pending(status: dict) -> None:
         global _matrix
         if not batch:
             return
-        with torch.no_grad():
-            tensors = torch.stack([t for _, t in batch])
-            embs = model.encode_image(tensors)
-            embs = embs / embs.norm(dim=-1, keepdim=True)
+        session = _get_onnx_visual()
+        if session is not None:  # M4: GPU (DirectML) via ONNX
+            arr = np.stack([t.numpy() for _, t in batch]).astype(np.float32)
+            out = session.run(["image_embeds"], {"pixel_values": arr})[0]
+            out = out / np.linalg.norm(out, axis=-1, keepdims=True)
+            embs = [row.astype(np.float32) for row in out]
+        else:                    # CPU fallback (no GPU, or export failed)
+            with torch.no_grad():
+                tensors = torch.stack([t for _, t in batch])
+                enc = model.encode_image(tensors)
+                enc = enc / enc.norm(dim=-1, keepdim=True)
+            embs = [row.numpy().astype(np.float32) for row in enc]
         with db.tx() as c:
             for (h, _), emb in zip(batch, embs):
                 c.execute(
                     "INSERT OR REPLACE INTO clip_embeddings (photo_hash, embedding) VALUES (?, ?)",
-                    (h, emb.numpy().astype(np.float32).tobytes()),
+                    (h, emb.tobytes()),
                 )
                 c.execute("UPDATE photos SET clip_done = 1 WHERE hash = ?", (h,))
         batch.clear()

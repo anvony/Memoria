@@ -674,13 +674,53 @@ def _run_pip(args: list[str]) -> None:
         raise RuntimeError(f"pip install failed: {' '.join(tail) or 'unknown error'}")
 
 
+def _directml_available() -> bool:
+    """Whether `import onnxruntime` in a FRESH interpreter exposes
+    DmlExecutionProvider. Checked in a subprocess on purpose: importing
+    onnxruntime here would pin whichever build is currently on disk into the
+    running server process, and if that's the wrong (CPU) build the reinstall
+    below couldn't take effect until a restart. A subprocess reads disk state
+    without polluting us."""
+    proc = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import onnxruntime, sys; "
+            "sys.exit(0 if 'DmlExecutionProvider' in onnxruntime.get_available_providers() else 1)",
+        ],
+        capture_output=True, text=True,
+    )
+    return proc.returncode == 0
+
+
+def _ensure_directml_onnxruntime() -> bool:
+    """Make the DirectML onnxruntime win the shared import namespace (M0).
+
+    `insightface` hard-depends on the plain `onnxruntime` distribution, which
+    unpacks into the SAME `onnxruntime` package as `onnxruntime-directml` and,
+    being versioned ahead, clobbers it — silently dropping DmlExecutionProvider
+    so faces run on the CPU. Fix: drop both and reinstall ONLY the DirectML
+    build. It bundles CPUExecutionProvider too, so machines without a DirectX-12
+    GPU keep working (they just fall back to CPU). Returns True if it applied a
+    fix, False if DirectML was already available (nothing to do)."""
+    if _directml_available():
+        return False
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime", "onnxruntime-directml"],
+        capture_output=True, text=True,
+    )
+    _run_pip(["--force-reinstall", "onnxruntime-directml>=1.18"])
+    return True
+
+
 def _prepare_ml() -> None:
-    """Background worker for POST /ml/enable. Two stages, both idempotent:
+    """Background worker for POST /ml/enable. Idempotent stages:
       1. install the ML packages if they aren't importable yet (torch CPU wheel +
          requirements-ml.txt — ~2 GB the first time, skipped on re-enable);
-      2. download the model weights (~1 GB) by warming the face + CLIP models.
+      2. ensure the DirectML onnxruntime is the one that survives (M0), so faces
+         actually use the GPU instead of silently falling back to CPU;
+      3. download the model weights (~1 GB) by warming the face + CLIP models.
     Progress/message are surfaced by GET /ml/status. `ml_enabled` is only
-    persisted once both stages succeed, so a failed install never leaves the
+    persisted once the stages succeed, so a failed install never leaves the
     toggle stuck 'on' but broken."""
     try:
         if not indexer.ml_available():
@@ -701,6 +741,25 @@ def _prepare_ml() -> None:
                 raise RuntimeError(
                     "packages installed but not importable — please restart Memoria and try again"
                 )
+
+        # M0: guarantee the GPU (DirectML) onnxruntime wins the namespace. Runs on
+        # both fresh installs and existing (broken) ones — it's a no-op when
+        # DirectML is already available.
+        _ml_download.update(progress=0.45, message="Checking GPU acceleration…")
+        if _ensure_directml_onnxruntime():
+            import importlib
+            importlib.invalidate_caches()
+            # If this process already imported onnxruntime (e.g. faces ran once
+            # this session under the broken CPU build), the on-disk reinstall
+            # can't hot-swap the loaded module — a restart is needed to pick up
+            # the GPU build. Persist the toggle so the restart comes back enabled.
+            if "onnxruntime" in sys.modules:
+                db.kv_set("ml_enabled", "1")
+                _ml_download.update(
+                    progress=1.0,
+                    message="GPU acceleration fixed — restart Memoria, then run a rescan.",
+                )
+                return
 
         _ml_download.update(progress=0.55, message="Preparing face model…")
         from . import faces as faces_mod

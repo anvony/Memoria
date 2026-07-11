@@ -162,9 +162,35 @@ def _index_todo(todo: list[int]) -> None:
     status.update(done=len(todo), current=None)
 
 
+def _warm_ml_models() -> None:
+    """M1: load the face + CLIP models on a side thread while stage 2 (hash +
+    EXIF + thumbnails — CPU/IO-bound, GPU idle) runs, so the models are ready by
+    the time the faces/CLIP stages start instead of stalling on a cold ~seconds
+    load then. No-op unless ML is installed AND enabled. Warm-up failures only
+    log — the real stage runs `_get_app`/`_get_model` again and surfaces any hard
+    error there; this thread must never take the run down."""
+    if not (ml_available() and ml_enabled()):
+        return
+
+    def _warm() -> None:
+        try:
+            from . import faces as faces_mod
+            faces_mod._get_app()
+        except Exception as exc:
+            print(f"[indexer] face model warm-up skipped: {exc}")
+        try:
+            from . import clipsearch
+            clipsearch._get_model()
+        except Exception as exc:
+            print(f"[indexer] CLIP model warm-up skipped: {exc}")
+
+    threading.Thread(target=_warm, name="memoria-ml-warmup", daemon=True).start()
+
+
 def _run() -> None:
     try:
         geocode.warm_up()
+        _warm_ml_models()
 
         # Outer loop: re-run the whole pipeline if a folder was queued (_rescan)
         # while it was busy — covers a folder added during faces/CLIP/backup,
