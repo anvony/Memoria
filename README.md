@@ -4,86 +4,230 @@
 
 A local-first photo & video manager for Windows — like Google Photos, but
 **nothing ever leaves your computer.** Memoria indexes the photo folders you
-already have (including external drives), gives you a timeline, albums, map,
-trips, duplicate detection, face grouping and "beach sunset" search — all
-running offline on your own PC. Your original files are only ever **read**,
-never modified, moved, or deleted.
+already have (including external drives) and gives you a timeline, albums, a map,
+auto-detected trips, duplicate detection, face grouping and "beach sunset"
+search — all running offline on your own PC.
+
+Your original photos are only ever **read**. Never modified, never moved, never
+permanently deleted.
 
 ---
 
-## Get started (2 steps)
+## Before you start
 
-> **Requirements:** Windows 10/11 and **[Python 3.12](https://python.org)**
-> (during install, tick **"Add Python to PATH"**). An internet connection is
-> needed for the one-time setup below. Windows 11 already includes WebView2, so
-> there's nothing else to install.
+You need three things:
 
-### 1. Run `setup.cmd` — once
+| | What | Notes |
+|---|---|---|
+| 1 | **Windows 10 or 11** | WebView2 is already built into Windows 11 — nothing to install |
+| 2 | **[Python 3.12](https://www.python.org/downloads/)** | ⚠️ During installation you **must tick "Add python.exe to PATH"** on the very first screen |
+| 3 | **An internet connection** | Only for the one-time setup. After that Memoria works completely offline |
 
-Double-click **`setup.cmd`**. It builds Memoria's photo engine, downloads the
-extra tools it needs, and puts a **Memoria** shortcut on your Desktop and Start
-Menu. This takes a few minutes and only happens the first time.
+**Python is the only prerequisite.** You do *not* need Visual Studio, C++ build
+tools, or any other developer software.
 
-### 2. Open **Memoria**
-
-Launch it from the Desktop shortcut (or double-click **`Memoria.exe`** in this
-folder). On first run Memoria asks:
-
-1. **Where to keep its own data** — its catalogue and thumbnail cache. Pick a
-   drive with some free space. *This is not your photo folder* — it's Memoria's
-   private workspace, and it's the only thing you'd ever need to back up.
-2. Then open **Settings → add a photo folder** by pasting its path, and watch it
-   index. That's it.
+> **Not sure if you have Python?** Press `Win + R`, type `cmd`, press Enter, then
+> type `python --version`. If you see a version number like `Python 3.12.x`,
+> you're set. If you see an error, install it from the link above.
 
 ---
 
-## Good to know
+## Step 1 — Download Memoria
 
-- **Your originals are safe.** Memoria never edits, moves, or hard-deletes your
-  files. Deletes go to the Recycle Bin; metadata edits live only in Memoria's
-  own catalogue unless you explicitly opt in.
-- **Everything is offline.** No account, no cloud, no telemetry. The only
-  network use is downloading tools/models during setup.
-- **Keep this folder together.** `Memoria.exe` and the `server` folder next to
-  it are a pair — don't separate them, or the app can't find its engine. To move
-  Memoria, move the whole folder and re-run `setup.cmd`.
-- **First launch after setup** can take a few seconds while the photo engine
-  starts. Indexing happens in the background — you can browse while it works.
+Go to the project page: **https://github.com/anvony/Memoria**
 
-### Faces & semantic search (optional — enable it yourself in Settings)
+### Option A — Download the ZIP (easiest, no extra software)
 
-Face grouping and "beach sunset" semantic search are **off by default**, and
-`setup.cmd` does **not** install them — that keeps the base install small and
-fast.
+1. Click the green **`< > Code`** button near the top right.
+2. Click **Download ZIP**. You'll get a file called `Memoria-main.zip`.
+3. **Important — unblock it first.** Windows marks files downloaded from the
+   internet as blocked, which will stop the setup script from running:
+   - Right-click `Memoria-main.zip` → **Properties**
+   - At the bottom, tick **Unblock** → click **OK**
+4. Right-click the ZIP → **Extract All…** → choose where to put it (see Step 2).
 
-To use them, you must **turn them on manually inside the app**:
+### Option B — Use Git (if you have it)
 
-1. Open Memoria → **Settings**.
-2. Under **Faces & semantic search**, click **Turn on**.
-3. The first time only, Memoria downloads everything it needs *on demand*
-   (~2–3 GB of packages + models) with a progress bar — leave it running.
+```
+git clone https://github.com/anvony/Memoria.git
+```
+
+---
+
+## Step 2 — Put the folder somewhere permanent
+
+Move the extracted folder (it'll be called `Memoria-main`, and you can rename it
+to just `Memoria`) to a **permanent location** — this is where the app will live
+from now on.
+
+**Good places:**
+- `C:\Memoria`
+- `D:\Memoria`
+- `C:\Users\YourName\Apps\Memoria`
+
+**Avoid:**
+- ❌ Your **Downloads** folder (you'll clear it out one day and delete the app)
+- ❌ Inside a **OneDrive-synced** folder (Desktop and Documents often are on
+  Windows 11) — OneDrive tries to sync thousands of engine files and can lock
+  them mid-use
+
+> **Why it matters:** `Memoria.exe` and the `server` folder next to it are a
+> pair. The app looks for its engine in the `server` folder sitting beside it.
+> If you move one without the other, or move the folder after setup, Memoria
+> can't start its engine. If you *do* need to move it later, move the **whole
+> folder** and run `setup.cmd` again.
+
+---
+
+## Step 3 — Run `setup.cmd` (once)
+
+Double-click **`setup.cmd`** inside the folder.
+
+This is the one-time step that builds Memoria's photo engine on your PC. It:
+
+- creates Memoria's private Python environment,
+- downloads the video tools it needs (ffmpeg),
+- and puts a **Memoria** shortcut on your Desktop and in the Start Menu.
+
+It takes a few minutes and shows its progress in a black console window. **Wait
+for it to say "All set"** before closing it.
+
+> **If Windows shows a blue "Windows protected your PC" box:** click
+> **More info → Run anyway**. This happens because the file came from the
+> internet and isn't code-signed. (You can read exactly what it does — it's a
+> plain text file you can open in Notepad.)
+
+> **If it says "Python was not found":** Python either isn't installed, or was
+> installed without ticking "Add python.exe to PATH". Reinstall it from
+> [python.org](https://www.python.org/downloads/), tick that box, then run
+> `setup.cmd` again.
+
+---
+
+## Step 4 — Open Memoria
+
+Launch it from the **Desktop shortcut**, or double-click **`Memoria.exe`** in the
+folder.
+
+> **First launch:** Windows SmartScreen may say *"Windows protected your PC —
+> unrecognized app"*. Click **More info → Run anyway**. This appears because the
+> app isn't code-signed (a certificate costs money); it's not a warning that
+> anything is wrong.
+
+Then Memoria asks you two things:
+
+**1. Where should Memoria keep its own data?**
+
+This is Memoria's private workspace — its catalogue and thumbnail cache. Pick a
+drive with some free space (a large library can use several GB of thumbnails).
+
+⚠️ **This is not your photo folder.** It's a separate folder Memoria creates for
+itself. It's also the only thing you'd ever need to back up.
+
+**2. Which photo folders should it index?**
+
+Open **Settings** → **Source folders** → add the folder(s) containing your
+photos. You can paste a path or browse for it. External drives are fine.
+
+Indexing then starts automatically in the background — you can browse while it
+works. The first run on a big library takes a while (it's reading every photo);
+after that, startup only checks for what's new, which is quick.
+
+---
+
+## Step 5 (optional) — Faces & semantic search
+
+Face grouping ("who is in my photos") and semantic search ("beach sunset") are
+**off by default**, and `setup.cmd` deliberately doesn't install them — that
+keeps the base install small and fast.
+
+To turn them on:
+
+1. Open Memoria → **Settings**
+2. Under **Faces & semantic search**, click **Turn on**
+3. The first time only, Memoria downloads what it needs on demand
+   (**~2–3 GB** of packages and AI models) with a progress bar. Leave it running.
 4. When it finishes, run a **rescan** so people and search results appear.
 
-**Python is the only prerequisite** — no Visual Studio / C++ build tools, no
-other software. Everything else (timeline, albums, map, trips, duplicates,
-HEIC & video thumbnails) works fully without ever turning this on.
+Everything else — timeline, albums, map, trips, duplicates, HEIC and video
+thumbnails — works fully without ever turning this on.
 
-### The Windows warning
+---
 
-`Memoria.exe` is not code-signed, so Windows SmartScreen may say
-"unrecognized app." Click **More info → Run anyway**. (Memoria is open source —
-you can read exactly what it does in the `server` folder and the source repo.)
+## Everyday use
+
+- **Your originals are safe.** Memoria never edits, moves, or permanently
+  deletes your files. Deletes go to the **Recycle Bin**. Metadata edits live only
+  in Memoria's own catalogue, unless you explicitly opt in to writing originals.
+- **Everything is offline.** No account, no cloud, no telemetry. The only network
+  use is the one-time setup and the optional AI model download.
+- **Leave it indexing.** It's incremental — if you close the app mid-index, it
+  picks up where it left off next time.
+- **Unplugged an external drive?** Those photos stay browsable from cached
+  thumbnails and are marked offline. Plug it back in and they come straight
+  back — even if Windows gave it a different drive letter.
+
+---
+
+## Troubleshooting
+
+### "It's showing photos that aren't mine"
+
+You're seeing Memoria's **demo library** (generic stock photos). This means the
+app started but couldn't find its engine, so it fell back to demo mode.
+
+Almost always one of these:
+
+1. **`setup.cmd` hasn't been run yet** in this folder → run it (Step 3).
+2. **The folder was moved after setup** → run `setup.cmd` again in the new
+   location.
+3. **`Memoria.exe` got separated from the `server` folder** → they must sit side
+   by side in the same folder.
+
+### "Windows protected your PC"
+
+Expected — the app isn't code-signed. **More info → Run anyway.** If you're
+cautious, the whole engine is readable Python source in the `server` folder.
+
+### Setup fails partway through
+
+Scroll up in the console window to see what failed. The usual causes are no
+internet connection, or antivirus blocking the ffmpeg download. Fix it and run
+`setup.cmd` again — it's safe to re-run and skips whatever already succeeded.
+
+### Videos have no thumbnails
+
+ffmpeg didn't download during setup. Re-run `setup.cmd` with an internet
+connection.
+
+### The app opens but stays empty
+
+Check **Settings → Source folders** — you may not have added a photo folder yet.
+If one is listed but shows as offline, the drive isn't connected.
+
+---
+
+## Updating to a new version
+
+1. Download the new version (Step 1).
+2. Extract it to a **new** folder.
+3. Run `setup.cmd` in the new folder.
+4. Point it at the **same data folder** you chose originally.
+
+Your library, albums, favourites, names and edits all live in that data folder,
+so they carry across untouched. Once the new version works, you can delete the
+old folder.
 
 ---
 
 ## Uninstall
 
-Memoria isn't "installed" into Windows — it lives entirely in this folder.
-To remove it:
+Memoria isn't "installed" into Windows — it lives entirely in its own folder.
+To remove it completely:
 
-1. Delete this folder.
+1. Delete the Memoria folder.
 2. Delete the shortcuts (Desktop + Start Menu).
 3. Optionally delete Memoria's data folder (the one you chose at first launch)
    and `%LOCALAPPDATA%\Memoria`.
 
-Your photos are untouched by any of this.
+**Your photos are untouched by all of this** — Memoria only ever read them.
