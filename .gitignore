@@ -6,6 +6,10 @@ server/.venv/
 server/tools/ffmpeg.exe
 server/tools/ffprobe.exe
 
+# Written by setup.cmd on the user's machine — the full output of every setup
+# step, shown only if something fails.
+setup-log.txt
+
 # Python bytecode
 __pycache__/
 *.pyc

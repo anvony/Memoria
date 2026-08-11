@@ -11,6 +11,8 @@ search — all running offline on your own PC.
 Your original photos are only ever **read**. Never modified, never moved, never
 permanently deleted.
 
+![Memoria's timeline](screenshots/timeline.jpg)
+
 ---
 
 ## Before you start
@@ -89,8 +91,23 @@ This is the one-time step that builds Memoria's photo engine on your PC. It:
 - downloads the video tools it needs (ffmpeg),
 - and puts a **Memoria** shortcut on your Desktop and in the Start Menu.
 
-It takes a few minutes and shows its progress in a black console window. **Wait
-for it to say "All set"** before closing it.
+A black console window opens with a progress bar:
+
+```
+============================================================
+   Memoria - one-time setup
+============================================================
+
+  Setting up Memoria. This takes a few minutes.
+  Please don't close this window.
+
+  [###########.........]  55%  Installing core packages
+```
+
+It takes a few minutes. **Leave it alone until it says "All set"**, then close it.
+
+If anything goes wrong it tells you what failed and writes the details to
+`setup-log.txt` in this folder.
 
 > **If Windows shows a blue "Windows protected your PC" box:** click
 > **More info → Run anyway**. This happens because the file came from the
@@ -154,6 +171,42 @@ thumbnails — works fully without ever turning this on.
 
 ---
 
+## A look around
+
+**The viewer.** Click any photo. Arrow keys move through the day, `I` opens the
+info panel (date, camera, dimensions, location, faces, and where the file lives
+on disk), `F` favourites it, `Ctrl+scroll` zooms up to 6× with drag to pan.
+
+![The full-screen viewer with its info panel open](screenshots/viewer.jpg)
+
+**Places.** Every photo with GPS lands on the map, clustered by location — click
+a cluster to see just those photos. Place names are worked out offline, with no
+internet call.
+
+![Places — a map of everywhere your photos were taken](screenshots/places.jpg)
+
+**Trips.** Memoria works out where you live from your photos, then groups the
+ones taken away from home into trips automatically. Nothing to tag.
+
+![Trips — automatically detected from dates and locations](screenshots/trips.jpg)
+
+**Albums** for the collections you make by hand — select photos in the grid and
+add them in a couple of clicks.
+
+![Albums](screenshots/albums.jpg)
+
+**Search** understands places, people, cameras, years and months in one box —
+try `paris 2023`. With semantic search on, plain-English description search
+("beach sunset") and `@lat,lng` coordinate lookup run through the same box.
+
+![Search results across the library](screenshots/search.jpg)
+
+> The screenshots above use Memoria's built-in demo library, so the photos in
+> them are stock images. The app is the real thing — point it at your own folders
+> and it's your photos in exactly this layout.
+
+---
+
 ## Everyday use
 
 - **Your originals are safe.** Memoria never edits, moves, or permanently
@@ -191,9 +244,13 @@ cautious, the whole engine is readable Python source in the `server` folder.
 
 ### Setup fails partway through
 
-Scroll up in the console window to see what failed. The usual causes are no
-internet connection, or antivirus blocking the ffmpeg download. Fix it and run
+The window tells you which step failed and what went wrong. The usual causes are
+no internet connection, or antivirus blocking the ffmpeg download. Fix it and run
 `setup.cmd` again — it's safe to re-run and skips whatever already succeeded.
+
+The full details are in **`setup-log.txt`** next to `setup.cmd` — that's the file
+to send if you need help. To watch every command as it runs instead of the
+progress bar, open a Command Prompt in this folder and run `setup.cmd -ShowOutput`.
 
 ### Videos have no thumbnails
 
