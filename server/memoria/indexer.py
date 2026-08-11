@@ -48,6 +48,14 @@ status: dict = {
     "error": None,
 }
 
+# M7: ML-stage progress, tracked separately from the top-level `status`. Faces
+# and CLIP now run on their own thread CONCURRENTLY with scanning/indexing (so
+# the GPU works on already-indexed photos instead of idling until the last file
+# is hashed), which means they can't share the single set of top-level counters.
+# `_run` mirrors this up to `status` only while it's waiting for ML to finish
+# draining at the end, so the UI still shows a faces/CLIP bar there.
+ml_progress: dict = {"state": "idle", "total": 0, "done": 0, "current": None}
+
 
 def ml_available() -> bool:
     try:
@@ -157,8 +165,13 @@ def _index_todo(todo: list[int]) -> None:
             # of the files in flight, not a strict sequence.
             status.update(done=done, current=Path(row["path"]).name)
             if exc is not None:  # one broken file must not kill the run
-                _record_failure(row, exc)
-                print(f"[indexer] failed on {row['path']}: {exc}")
+                attempts = _record_failure(row, exc)
+                if attempts >= scanner.MAX_INDEX_ATTEMPTS:
+                    print(f"[indexer] giving up on {row['path']} after {attempts} "
+                          f"attempts: {exc}")
+                else:
+                    print(f"[indexer] failed on {row['path']} "
+                          f"(attempt {attempts}/{scanner.MAX_INDEX_ATTEMPTS}): {exc}")
     status.update(done=len(todo), current=None)
 
 
@@ -188,13 +201,28 @@ def _warm_ml_models() -> None:
 
 
 def _run() -> None:
+    ml_stop = threading.Event()
+    ml_thread: threading.Thread | None = None
     try:
         geocode.warm_up()
         _warm_ml_models()
 
+        # M7: run the ML stages (faces + CLIP) CONCURRENTLY with scanning/indexing.
+        # A dedicated consumer thread processes already-indexed photos on the GPU
+        # while this thread keeps hashing/thumbnailing the rest on the CPU, so the
+        # GPU no longer sits idle until the very last file is indexed. SQLite WAL +
+        # timeout=30 makes the two writers safe, and each thread owns its own
+        # connection. The consumer keeps polling for newly-indexed photos and only
+        # exits once `ml_stop` is set (indexing finished) and nothing is pending.
+        if ml_available() and ml_enabled():
+            ml_thread = threading.Thread(
+                target=_ml_consumer, args=(ml_stop,), name="memoria-ml", daemon=True
+            )
+            ml_thread.start()
+
         # Outer loop: re-run the whole pipeline if a folder was queued (_rescan)
-        # while it was busy — covers a folder added during faces/CLIP/backup,
-        # after the scan loop below has already finished.
+        # while it was busy — covers a folder added during phash/backup, after the
+        # scan loop below has already finished.
         while True:
             _rescan.clear()
 
@@ -219,14 +247,6 @@ def _run() -> None:
             _pair_live_photos()
             _compute_phashes()
 
-            if ml_available() and ml_enabled():
-                from . import faces as faces_mod
-                _set("faces")
-                faces_mod.process_pending(status)
-                from . import clipsearch
-                _set("clip")
-                clipsearch.process_pending(status)
-
             # Autosave the catalogue after every completed sync (scope: "after
             # each sync"). Cheap — the DB is small — and keeps a rolling safety
             # net.
@@ -242,10 +262,76 @@ def _run() -> None:
             if not _rescan.is_set():
                 break
 
+        # Indexing is finished. Tell the ML consumer no more photos are coming and
+        # wait for it to drain, mirroring its progress to the top-level status so
+        # the UI shows the faces/CLIP bar here instead of jumping straight to
+        # "done" while the GPU is still working through the backlog.
+        if ml_thread is not None:
+            ml_stop.set()
+            while ml_thread.is_alive():
+                _set(ml_progress.get("state") or "faces",
+                     total=ml_progress.get("total", 0),
+                     done=ml_progress.get("done", 0),
+                     current=ml_progress.get("current"))
+                ml_thread.join(timeout=0.5)
+
         _set("done")
     except Exception as exc:
         traceback.print_exc()
         _set("error", error=str(exc))
+        # Don't leave the consumer running against a torn-down run.
+        ml_stop.set()
+        if ml_thread is not None:
+            ml_thread.join(timeout=5)
+    finally:
+        db.close_conn()
+
+
+def _ml_pending() -> bool:
+    """True if any indexed, non-Live-Photo photo still needs a face or CLIP pass."""
+    row = db.get_conn().execute(
+        "SELECT 1 FROM photos WHERE live_of IS NULL AND (faces_done = 0 OR clip_done = 0) LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
+def _ml_consumer(stop: threading.Event) -> None:
+    """M7: process the ML stages (faces + CLIP) concurrently with indexing.
+
+    Runs on its own thread with its own DB connection. Each cycle it pairs Live
+    Photos (so a just-indexed MOV is flagged before the faces/CLIP selects, not
+    embedded as a standalone clip) then processes whatever photos are currently
+    indexed-but-not-yet-ML'd. When indexing is still going it waits a beat for
+    more; once `stop` is set it does final passes until nothing is pending, then
+    exits. This is the ONLY caller of the ML stages, so there's never a second
+    thread selecting the same `*_done = 0` rows — no duplicate embeddings.
+
+    All progress goes to the module-level `ml_progress`, never the top-level
+    `status`, so the indexer's own counters aren't clobbered while both run. Never
+    raises: ML is optional, so a model/GPU failure is logged and ends the loop
+    without taking indexing down."""
+    try:
+        from . import clipsearch
+        from . import faces as faces_mod
+        while True:
+            _pair_live_photos()
+            ml_progress["state"] = "faces"
+            faces_mod.process_pending(ml_progress)
+            ml_progress["state"] = "clip"
+            clipsearch.process_pending(ml_progress)
+            if stop.is_set():
+                # A photo may have been indexed during the pass we just ran; loop
+                # until a full pass finds nothing left, then we're truly done.
+                if not _ml_pending():
+                    break
+            else:
+                ml_progress["state"] = "idle"
+                stop.wait(1.0)  # wait for more photos to be indexed (or an early stop)
+        ml_progress["state"] = "done"
+    except Exception as exc:
+        traceback.print_exc()
+        ml_progress["state"] = "error"
+        print(f"[indexer] ML consumer stopped on error: {exc}")
     finally:
         db.close_conn()
 
@@ -319,8 +405,19 @@ def _index_one(file_id: int):
         return row, exc
 
 
-def _record_failure(row, exc: Exception) -> None:
+def _record_failure(row, exc: Exception) -> int:
+    """Record a per-file failure and bump its attempt counter. Returns the new
+    attempt count so the caller can log when a file is being given up on. The
+    counter is what stops a permanently-broken file (truncated JPG, etc.) from
+    being re-queued on every scan pass forever — once it reaches
+    `scanner.MAX_INDEX_ATTEMPTS` the scanner stops handing it back, so one bad
+    file can't wedge the pipeline in an endless retry loop and block the ML
+    stages from starting."""
     with db.tx() as c:
+        c.execute("UPDATE files SET attempts = COALESCE(attempts, 0) + 1 WHERE id = ?", (row["id"],))
+        attempts = c.execute(
+            "SELECT attempts FROM files WHERE id = ?", (row["id"],)
+        ).fetchone()["attempts"]
         c.execute(
             "INSERT INTO failed_files (path, folder_id, error, failed_at) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(path) DO UPDATE SET "
@@ -328,6 +425,7 @@ def _record_failure(row, exc: Exception) -> None:
             (row["path"], row["folder_id"], str(exc)[:500],
              datetime.now(timezone.utc).isoformat()),
         )
+    return attempts
 
 
 def _clear_resolved_failures() -> None:

@@ -18,6 +18,14 @@ from pathlib import Path
 from . import db
 from .media import MEDIA_EXTS
 
+# Give up on a file after this many failed indexing attempts. A truncated /
+# corrupt file (e.g. "image file is truncated") fails every pass but keeps
+# content_hash = NULL, so without a cap the scanner hands it back on every scan
+# and the pipeline retries it forever — never reaching the faces/CLIP stages.
+# The count resets if the file's size/mtime change (it was edited/replaced, so
+# the old failures no longer apply).
+MAX_INDEX_ATTEMPTS = 5
+
 
 def volume_info(path: Path) -> tuple[str, str]:
     """(volume_serial_hex, label) for the drive containing `path`."""
@@ -209,13 +217,19 @@ def scan_folder(folder_id: int) -> list[int]:
             if row and row["size"] == st.st_size and abs(row["mtime"] - st.st_mtime) < 1:
                 if row["status"] != "ok":
                     c.execute("UPDATE files SET status = 'ok' WHERE id = ?", (row["id"],))
-                if row["content_hash"] is None:
-                    todo.append(row["id"])  # scanned before but never indexed
+                # Scanned before but never indexed — re-queue it, UNLESS it has
+                # already failed MAX_INDEX_ATTEMPTS times (a broken file we've
+                # given up on, so it stops blocking the rest of the pipeline).
+                if row["content_hash"] is None and (row["attempts"] or 0) < MAX_INDEX_ATTEMPTS:
+                    todo.append(row["id"])
                 continue
             if row:
+                # size/mtime changed -> the file was edited or replaced, so any
+                # earlier failures no longer apply: clear the attempt counter and
+                # give it a fresh set of tries.
                 c.execute(
-                    "UPDATE files SET size = ?, mtime = ?, content_hash = NULL, status = 'ok' "
-                    "WHERE id = ?",
+                    "UPDATE files SET size = ?, mtime = ?, content_hash = NULL, status = 'ok', "
+                    "  attempts = 0 WHERE id = ?",
                     (st.st_size, st.st_mtime, row["id"]),
                 )
                 todo.append(row["id"])

@@ -7,3 +7,11 @@
 insightface>=1.0.1        # face detection + embeddings (pure-Python wheel since 1.0)
 onnxruntime-directml>=1.18 # GPU acceleration on any Windows GPU (DirectML)
 open_clip_torch>=2.24     # CLIP embeddings for "beach sunset" search
+
+# GOTCHA (M0): insightface hard-depends on the plain `onnxruntime` distribution,
+# which unpacks into the SAME `onnxruntime` import namespace as
+# `onnxruntime-directml` above. pip installs BOTH and the newer one's files win —
+# the plain CPU build clobbers DirectML, DmlExecutionProvider vanishes, and faces
+# silently run on the CPU. Listing order here does NOT fix it. The install flow
+# (setup.ps1 + api._ensure_directml_onnxruntime) force-reinstalls the DirectML
+# build LAST so it wins the namespace. Don't "simplify" that away.

@@ -202,6 +202,11 @@ MIGRATIONS = [
     # A cover image uploaded from disk for a trip (filename under
     # data_dir/trip_covers/); takes precedence over a chosen trip photo.
     ("trip_overrides", "cover_image", "ALTER TABLE trip_overrides ADD COLUMN cover_image TEXT"),
+    # How many times indexing has failed on this file. The scanner stops
+    # re-queueing a file once it hits scanner.MAX_INDEX_ATTEMPTS, so one
+    # permanently-broken file (e.g. a truncated JPG) can't wedge the pipeline in
+    # an endless retry loop and block the ML stages from ever starting.
+    ("files", "attempts", "ALTER TABLE files ADD COLUMN attempts INTEGER DEFAULT 0"),
 ]
 
 
