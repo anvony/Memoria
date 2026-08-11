@@ -1,0 +1,7 @@
+# GitHub language stats (Linguist).
+#
+# ExifTool is a third-party tool committed into this bundle so the "edit
+# originals" feature works without the user installing anything. It's ~460 Perl
+# modules — without this, GitHub reports the repo as 99% Perl.
+server/tools/exiftool_files/** linguist-vendored
+server/tools/exiftool_files/** -linguist-detectable
