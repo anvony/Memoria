@@ -209,6 +209,46 @@ try {
     # wheel, so Python stays the ONLY prerequisite and no C++ build tools are
     # ever needed. (-SkipML is accepted for backward compatibility; it's a no-op.)
 
+    # --- Visual C++ runtime -------------------------------------------------
+    # onnxruntime and opencv (pulled in by insightface, when the user turns on
+    # faces + semantic search) are C++ and link against msvcp140.dll. Python's
+    # own installer ships vcruntime140.dll app-local but NOT msvcp140.dll -- it's
+    # a C program and doesn't need the C++ standard library. So a machine can
+    # have a perfectly good Python and still fail to import onnxruntime with
+    # "DLL load failed". Windows 11 ships the runtime; a clean Windows 10 often
+    # doesn't, which is exactly where this bites.
+    #
+    # Redistributing vc_redist.x64.exe is expressly permitted by the Visual
+    # Studio licence terms, so we fetch and install it rather than making the
+    # user hunt for it. Non-fatal: the base app never needs it, only ML does.
+    $script:Stage = "Checking the Visual C++ runtime"
+    $needVC = -not (Test-Path (Join-Path $env:SystemRoot "System32\msvcp140.dll"))
+    if (-not $needVC) {
+        Add-Log "Visual C++ runtime already present (msvcp140.dll found)."
+        Write-Bar 0.74 "Visual C++ runtime already installed"
+    } else {
+        Add-Log "msvcp140.dll missing - installing the Visual C++ runtime."
+        try {
+            $vc = Join-Path $env:TEMP "memoria-vc_redist.x64.exe"
+            Get-FileWithProgress -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" `
+                -OutFile $vc -Label "Downloading the Visual C++ runtime" -From 0.70 -To 0.73
+            # This installer always elevates, so an unelevated setup.cmd gets a
+            # UAC prompt here. Warn first -- an unexplained prompt mid-progress-bar
+            # reads as malware.
+            Write-Note -Text "Windows will ask for permission to install the Visual C++ runtime - please click Yes." `
+                       -Colour Yellow -Fraction 0.73 -Label "Installing the Visual C++ runtime"
+            Invoke-Logged -FilePath $vc -Arguments @("/install", "/quiet", "/norestart") `
+                -Label "Installing the Visual C++ runtime" -From 0.73 -To 0.74 -ExpectSec 40
+            Add-Log "Visual C++ runtime installed."
+        } catch {
+            Add-Log "Visual C++ runtime install failed: $($_.Exception.Message)"
+            Write-Note -Text "Could not install the Visual C++ runtime - faces & semantic search may not start." `
+                       -Colour Yellow -Fraction 0.74 -Label "Continuing without it"
+            Write-Note -Text "Install it later from https://aka.ms/vs/17/release/vc_redist.x64.exe" `
+                       -Colour DarkGray -Fraction 0.74 -Label "Continuing without it"
+        }
+    }
+
     # --- External tools -----------------------------------------------------
     # ffmpeg and ExifTool are native binaries, not pip packages, so we fetch them
     # here rather than making a first-time user install anything by hand. Both
@@ -232,7 +272,7 @@ try {
             $zip = Join-Path $env:TEMP "memoria-ffmpeg.zip"
             $out = Join-Path $env:TEMP "memoria-ffmpeg"
             Get-FileWithProgress -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
-                -OutFile $zip -Label "Downloading video support" -From 0.70 -To 0.88
+                -OutFile $zip -Label "Downloading video support" -From 0.74 -To 0.88
             Write-Bar 0.89 "Unpacking video support"
             if (Test-Path $out) { Remove-Item -Recurse -Force $out }
             Expand-Archive -Path $zip -DestinationPath $out -Force

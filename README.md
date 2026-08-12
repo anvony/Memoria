@@ -88,8 +88,16 @@ Double-click **`setup.cmd`** inside the folder.
 This is the one-time step that builds Memoria's photo engine on your PC. It:
 
 - creates Memoria's private Python environment,
+- installs the Microsoft Visual C++ runtime if your PC doesn't have it
+  (common on Windows 10; Windows 11 already includes it),
 - downloads the video tools it needs (ffmpeg),
 - and puts a **Memoria** shortcut on your Desktop and in the Start Menu.
+
+> **Windows may ask for permission once.** If your PC is missing the Visual C++
+> runtime, Windows shows a **User Account Control** prompt to install it — click
+> **Yes**. That runtime is what the optional face grouping and semantic search
+> need in order to start. It's a standard Microsoft component, and setup skips
+> this entirely if you already have it.
 
 A black console window opens with a progress bar:
 
@@ -251,6 +259,19 @@ no internet connection, or antivirus blocking the ffmpeg download. Fix it and ru
 The full details are in **`setup-log.txt`** next to `setup.cmd` — that's the file
 to send if you need help. To watch every command as it runs instead of the
 progress bar, open a Command Prompt in this folder and run `setup.cmd -ShowOutput`.
+
+### "Setup failed: packages installed but not importable"
+
+This appears when turning on **Faces & semantic search**, and almost always means
+the **Microsoft Visual C++ runtime** is missing — most often on Windows 10.
+The download succeeded; the packages just can't load without it.
+
+Install it, then turn the feature on again:
+
+**https://aka.ms/vs/17/release/vc_redist.x64.exe**
+
+Re-running `setup.cmd` also installs it for you. (Restarting Memoria alone won't
+help — the missing piece is a Windows component, not the app.)
 
 ### Videos have no thumbnails
 
