@@ -22,7 +22,7 @@ You need three things:
 | | What | Notes |
 |---|---|---|
 | 1 | **Windows 10 or 11** | WebView2 is already built into Windows 11 — nothing to install |
-| 2 | **[Python 3.12](https://www.python.org/downloads/)** | ⚠️ During installation you **must tick "Add python.exe to PATH"** on the very first screen |
+| 2 | **[Python 3.12](https://www.python.org/downloads/release/python-31212/)** | ⚠️ During installation you **must tick "Add python.exe to PATH"** on the very first screen. Use this 3.12 link — the generic downloads page now offers 3.14, which Memoria isn't tested on |
 | 3 | **An internet connection** | Only for the one-time setup. After that Memoria works completely offline |
 
 **Python is the only prerequisite.** You do *not* need Visual Studio, C++ build
@@ -124,8 +124,12 @@ If anything goes wrong it tells you what failed and writes the details to
 
 > **If it says "Python was not found":** Python either isn't installed, or was
 > installed without ticking "Add python.exe to PATH". Reinstall it from
-> [python.org](https://www.python.org/downloads/), tick that box, then run
-> `setup.cmd` again.
+> [python.org](https://www.python.org/downloads/release/python-31212/), tick
+> that box, then run `setup.cmd` again.
+
+> **If it warns about your Python version:** setup keeps going, and it usually
+> works. But if anything fails afterwards, an untested Python is the first thing
+> to suspect — install 3.12 from the link above and run `setup.cmd` again.
 
 ---
 
@@ -272,6 +276,53 @@ Install it, then turn the feature on again:
 
 Re-running `setup.cmd` also installs it for you. (Restarting Memoria alone won't
 help — the missing piece is a Windows component, not the app.)
+
+### The app opens in demo mode, or a black window flashes and vanishes
+
+Memoria's engine tried to start and failed. Whatever went wrong is written to
+**`server-log.txt`**, next to `setup.cmd` — it's rewritten every launch, so it
+always describes the run you just did. Open it in Notepad and read the bottom.
+
+Two common causes:
+
+- **`SyntaxError: source code string cannot contain null bytes`** (or any other
+  import error) — the Python environment was only half-written, usually an
+  interrupted install or antivirus removing a file. Delete the
+  `server\.venv` folder and run `setup.cmd` again.
+- **A Python version warning earlier in setup** — install 3.12 from the link in
+  "Before you start", then re-run `setup.cmd`.
+
+That file is the one to send if you need help.
+
+### Faces or semantic search freezes partway
+
+The progress stops moving and never resumes, most often inside a virtual
+machine or on an older PC. This is the AI work trying to use the graphics card
+through DirectX 12; where that isn't properly available, it can stall instead of
+failing cleanly.
+
+Force it onto the processor instead. Close Memoria, then create a file called
+`run-memoria-cpu.cmd` next to `Memoria.exe` containing:
+
+```
+@echo off
+set MEMORIA_FORCE_CPU=1
+start "" "%~dp0Memoria.exe"
+```
+
+Double-click that to launch. It's slower, but it completes. Everything else in
+the app is unaffected.
+
+### Videos don't play in the viewer
+
+The photo opens but the video stays black or won't start. Usually the Windows
+video codecs are missing — common on **Windows N/KN editions** and on bare
+virtual machines. Install Microsoft's **Media Feature Pack** (Settings →
+Apps → Optional features → Add a feature → "Media Feature Pack"), then restart
+Memoria.
+
+Thumbnails for those videos are generated separately and will still appear even
+when playback doesn't work.
 
 ### Videos have no thumbnails
 

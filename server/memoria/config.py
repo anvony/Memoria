@@ -71,3 +71,18 @@ def models_dir() -> Path:
     data_dir = get_data_dir()
     assert data_dir is not None, "setup has not run"
     return data_dir / "models"
+
+
+def force_cpu() -> bool:
+    """True when MEMORIA_FORCE_CPU is set — pin the ML stages to the CPU.
+
+    onnxruntime-directml advertises DmlExecutionProvider whenever it's
+    installed, even on a machine with no usable DirectX 12 device (a VM, or a
+    GPU too old for DX12). The session is then created happily and stalls on the
+    first real inference, which the user sees as a progress bar frozen at a
+    batch boundary with no error message — nothing raised, so nothing to catch.
+
+    There's no dependable in-process way to tell a working DML device from one
+    that will hang, so this is the manual override for those machines. Faces and
+    semantic search still work; they just run on the CPU."""
+    return os.environ.get("MEMORIA_FORCE_CPU", "").strip().lower() in {"1", "true", "yes", "on"}

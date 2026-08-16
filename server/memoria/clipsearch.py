@@ -95,6 +95,10 @@ def _get_onnx_visual():
         if _onnx_session is None and not _onnx_failed:
             try:
                 import onnxruntime as ort
+                if config.force_cpu():
+                    print("[clip] MEMORIA_FORCE_CPU set — using the CPU path.")
+                    _onnx_failed = True
+                    return None
                 if "DmlExecutionProvider" not in ort.get_available_providers():
                     _onnx_failed = True  # CPU-only box: the torch path is equivalent
                     return None
@@ -112,7 +116,11 @@ def _get_onnx_visual():
     return _onnx_session
 
 
-def process_pending(status: dict) -> None:
+def process_pending(status: dict, base: int = 0) -> int:
+    """Embed every photo still missing a CLIP vector. Returns how many were
+    processed. `base` is the running total across cycles — see the matching
+    explanation in faces.process_pending; without it the bar restarts at zero
+    every pass while indexing is still feeding new photos in."""
     global _matrix
     import torch
 
@@ -121,10 +129,11 @@ def process_pending(status: dict) -> None:
         "SELECT hash FROM photos WHERE clip_done = 0 AND live_of IS NULL"
     ).fetchall()
     if not pending:
-        return
+        status.update(total=base, done=base, current=None)
+        return 0
     model, preprocess, _ = _get_model()
 
-    status.update(total=len(pending), done=0)
+    status.update(total=base + len(pending), done=base)
     batch: list[tuple[str, "torch.Tensor"]] = []
 
     def flush() -> None:
@@ -154,7 +163,7 @@ def process_pending(status: dict) -> None:
         _matrix = None  # invalidate the search cache
 
     for i, row in enumerate(pending):
-        status.update(done=i, current=row["hash"][:12])
+        status.update(done=base + i, current=row["hash"][:12])
         thumb, _ = media.thumb_paths(config.thumbs_dir(), row["hash"])
         if not thumb.exists():
             with db.tx() as c:
@@ -168,7 +177,8 @@ def process_pending(status: dict) -> None:
         if len(batch) >= 32:  # bigger batch amortises per-call overhead on CPU;
             flush()           # 224x224 inputs make the memory cost trivial
     flush()
-    status.update(done=len(pending), current=None)
+    status.update(done=base + len(pending), current=None)
+    return len(pending)
 
 
 def _load_matrix() -> tuple[np.ndarray, list[str]]:

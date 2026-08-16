@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import math
+import mimetypes
 import os
 import re
 import shutil
@@ -194,6 +195,34 @@ def photo_preview(photo_id: str, pt: str | None = None) -> FileResponse:
     return FileResponse(preview, media_type="image/webp", headers=CACHE_FOREVER)
 
 
+# Content types for the raw originals we hand to <img>/<video>.
+#
+# Left to itself FileResponse guesses with `mimetypes`, which on Windows is
+# seeded from the REGISTRY — so the type served for a .mp4 depends on what else
+# happens to be installed on that PC. On a bare machine (a fresh VM, a new
+# Windows install) the guess can come back None, the response goes out with a
+# generic type, and <video> refuses to play a file it can't identify. The
+# machine that built it plays fine; the clean one doesn't.
+#
+# Pinning the formats we actually serve makes playback independent of the host's
+# registry. Anything not listed still falls through to the guess.
+_MEDIA_TYPES = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+    ".webm": "video/webm", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+    ".3gp": "video/3gpp", ".m2ts": "video/mp2t", ".mts": "video/mp2t",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    ".heic": "image/heic", ".heif": "image/heif",
+    ".tif": "image/tiff", ".tiff": "image/tiff", ".dng": "image/x-adobe-dng",
+}
+
+
+def _media_type(path: str) -> str | None:
+    """Content-Type for an original file, registry-independent where it matters.
+    None means 'let FileResponse guess', which is fine for the long tail."""
+    return _MEDIA_TYPES.get(Path(path).suffix.lower()) or mimetypes.guess_type(path)[0]
+
+
 @router.get("/photos/{photo_id}/original")
 def photo_original(photo_id: str, pt: str | None = None):
     """The actual file — used for video playback (FileResponse handles the
@@ -206,7 +235,7 @@ def photo_original(photo_id: str, pt: str | None = None):
     ).fetchone()
     if row is None:
         raise HTTPException(404, "file offline or missing")
-    return FileResponse(row["path"])
+    return FileResponse(row["path"], media_type=_media_type(row["path"]))
 
 
 @router.get("/photos/{photo_id}/location")
@@ -238,7 +267,7 @@ def photo_live_video(photo_id: str, pt: str | None = None):
     ).fetchone()
     if row is None:
         raise HTTPException(404)
-    return FileResponse(row["path"])
+    return FileResponse(row["path"], media_type=_media_type(row["path"]))
 
 
 # ---- Delete / Hide -----------------------------------------------------------
@@ -738,9 +767,19 @@ def _prepare_ml() -> None:
             import importlib
             importlib.invalidate_caches()
             if not indexer.ml_available():
-                raise RuntimeError(
-                    "packages installed but not importable — please restart Memoria and try again"
-                )
+                # Surface the ACTUAL import error. "Not importable" on its own is
+                # undiagnosable — a missing package and a missing native runtime
+                # (VC++ redistributable) produce the same message but need
+                # completely different fixes. See indexer.ml_import_error.
+                detail = indexer.ml_import_error() or "unknown import error"
+                hint = ""
+                if "DLL load failed" in detail:
+                    hint = (
+                        " — this usually means the Microsoft Visual C++ 2015-2022 "
+                        "x64 Redistributable is missing. Install it from "
+                        "https://aka.ms/vs/17/release/vc_redist.x64.exe, then restart Memoria."
+                    )
+                raise RuntimeError(f"packages installed but not importable: {detail}{hint}")
 
         # M0: guarantee the GPU (DirectML) onnxruntime wins the namespace. Runs on
         # both fresh installs and existing (broken) ones — it's a no-op when

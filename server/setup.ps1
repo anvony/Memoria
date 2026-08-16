@@ -191,6 +191,28 @@ Write-Host ""
 try {
     Write-Bar 0.0 "Preparing"
 
+    # --- Python version ------------------------------------------------------
+    # setup.cmd's `where python` only proves SOME python is on PATH, not which.
+    # That gap is real: the README says "Python 3.12" but links to
+    # python.org/downloads, which now serves 3.14 -- so a user following the
+    # instructions exactly can end up on a version this was never tested against.
+    # Warn rather than block: a newer Python usually works fine, and refusing to
+    # install would strand people over a version that's probably OK. The import
+    # check at the end of setup is what actually proves the environment works.
+    $script:Stage = "Checking Python"
+    $pyVer = ""
+    try {
+        $pyVer = (& python -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>&1 |
+                  Select-Object -First 1).ToString().Trim()
+    } catch { }
+    Add-Log "Python on PATH reports version '$pyVer'."
+    if ($pyVer -and ($pyVer -notin @("3.12", "3.13"))) {
+        Write-Note -Text "You have Python $pyVer. Memoria is built and tested on Python 3.12." `
+                   -Colour Yellow -Fraction 0.0 -Label "Checking Python"
+        Write-Note -Text "Setup will carry on. If it fails, install 3.12 from python.org and run setup.cmd again." `
+                   -Colour DarkGray -Fraction 0.0 -Label "Checking Python"
+    }
+
     # --- Python environment -------------------------------------------------
     Invoke-Logged -FilePath "python" -Arguments @("-m", "venv", ".venv") `
         -Label "Creating Memoria's Python environment" -From 0.00 -To 0.08 -ExpectSec 20
@@ -350,6 +372,33 @@ try {
         }
     } else {
         Add-Log "Memoria.exe not found next to server\, skipping shortcuts."
+    }
+
+    # --- Does it actually run? ----------------------------------------------
+    # Everything above can "succeed" and still leave an engine that can't start:
+    # pip reports 0 while a half-written file sits on disk (an interrupted
+    # install, a VM snapshot rollback, an antivirus quarantine), and the failure
+    # only shows up at first launch -- in a console window that closes in three
+    # seconds, so the user sees the app silently fall back to demo mode.
+    #
+    # Importing the app is the cheapest proof the environment is real. It costs
+    # about a second and turns an invisible first-launch failure into a setup
+    # failure with the traceback already in setup-log.txt. `memoria.api` does no
+    # work at import time beyond building the router, so this needs no library
+    # or data folder to exist yet.
+    $script:Stage = "Checking the installation"
+    try {
+        Invoke-Logged -FilePath ".\.venv\Scripts\python.exe" `
+            -Arguments @("-c", "import memoria.api") `
+            -Label "Checking the installation" -From 0.99 -To 1.0 -ExpectSec 8
+        Add-Log "Import check passed - the engine starts."
+    } catch {
+        Add-Log "Import check FAILED: $($_.Exception.Message)"
+        Write-Note -Text "Memoria's engine installed but can't start - see the error below." `
+            -Colour Yellow -Fraction 0.99 -Label "Checking the installation"
+        Write-Note -Text "Usually a half-finished install: delete the 'server\.venv' folder, then run setup.cmd again." `
+            -Colour DarkGray -Fraction 0.99 -Label "Checking the installation"
+        throw
     }
 
     Write-Bar 1.0 "Done"

@@ -55,10 +55,15 @@ def _get_app():
     with _app_lock:
         if _app is None:
             from insightface.app import FaceAnalysis
+            # MEMORIA_FORCE_CPU skips DirectML entirely — see config.force_cpu.
+            providers = (
+                ["CPUExecutionProvider"] if config.force_cpu()
+                else ["DmlExecutionProvider", "CPUExecutionProvider"]
+            )
             app = FaceAnalysis(
                 name="buffalo_l",
                 root=str(config.models_dir() / "insightface"),
-                providers=["DmlExecutionProvider", "CPUExecutionProvider"],
+                providers=providers,
             )
             app.prepare(ctx_id=0, det_size=(640, 640))
             _log_active_provider(app)
@@ -131,16 +136,27 @@ def _decode_preview(photo_hash: str):
         return None
 
 
-def process_pending(status: dict) -> None:
+def process_pending(status: dict, base: int = 0) -> int:
+    """Detect faces for every photo still missing them. Returns how many were
+    processed, so the caller can keep a running total across cycles.
+
+    `base` is that running total. It exists because this runs CONCURRENTLY with
+    indexing: each cycle re-queries what's pending, so without a carried-over
+    base the bar restarts from zero on every pass and the UI jumps around
+    ("2/2", then "31/89"). Offsetting by what's already done makes `done` climb
+    monotonically and `total` only ever grow as new photos arrive."""
     conn = db.get_conn()
     pending = conn.execute(
         "SELECT hash FROM photos WHERE faces_done = 0 AND live_of IS NULL"
     ).fetchall()
     if not pending:
-        return
+        # Nothing left: report the stage complete rather than leaving the
+        # previous cycle's numbers on screen under a new label.
+        status.update(total=base, done=base, current=None)
+        return 0
     app = _get_app()
     centroids = _load_centroids()
-    status.update(total=len(pending), done=0)
+    status.update(total=base + len(pending), done=base)
 
     # M2 producer/consumer: a prefetch thread decodes+downscales the next previews
     # (CPU-bound) while THIS thread runs the detector on the GPU, so the GPU isn't
@@ -189,7 +205,7 @@ def process_pending(status: dict) -> None:
         if item is _END:
             break
         photo_hash, rgb = item
-        status.update(done=processed, current=photo_hash[:12])
+        status.update(done=base + processed, current=photo_hash[:12])
         processed += 1
         if rgb is not None:
             try:
@@ -218,7 +234,8 @@ def process_pending(status: dict) -> None:
             flush()
     flush()
     _cleanup_orphan_people()
-    status.update(done=len(pending), current=None)
+    status.update(done=base + len(pending), current=None)
+    return len(pending)
 
 
 def _num(v) -> float:

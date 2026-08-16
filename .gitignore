@@ -10,6 +10,11 @@ server/tools/ffprobe.exe
 # step, shown only if something fails.
 setup-log.txt
 
+# Written by the app on every launch — the backend's own output, so a server
+# that dies on startup leaves a readable trace instead of a console window that
+# closes too fast to read.
+server-log.txt
+
 # Python bytecode
 __pycache__/
 *.pyc

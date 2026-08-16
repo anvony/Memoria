@@ -66,6 +66,34 @@ def ml_available() -> bool:
         return False
 
 
+def ml_import_error() -> str | None:
+    """The REASON `ml_available()` said False, as a human-readable string.
+
+    `ml_available` is a hot-path bool and throws the exception away, which makes
+    a failed install undiagnosable from the UI: "not importable" is true but
+    useless. The two failures look identical there and need opposite fixes:
+
+      ModuleNotFoundError  -> the package really isn't installed (pip put it
+                              somewhere else, or the install silently no-op'd).
+      ImportError: DLL load failed
+                           -> the package IS installed but a native dependency
+                              is missing. On a fresh Windows install that's
+                              almost always the Microsoft Visual C++ 2015-2022
+                              x64 runtime, which onnxruntime and opencv link
+                              against. Windows 11 ships it; a bare Windows 10
+                              image often doesn't.
+
+    Returns None if everything imports fine."""
+    import sys
+
+    for mod in ("insightface", "open_clip"):
+        try:
+            __import__(mod)
+        except ImportError as exc:
+            return f"`import {mod}` failed: {exc} (python: {sys.executable})"
+    return None
+
+
 def ml_enabled() -> bool:
     """Faces + semantic search are opt-in: the packages being installed isn't
     enough, the user must turn them on (they're heavy and download ~1 GB of
@@ -272,8 +300,14 @@ def _run() -> None:
                 _set(ml_progress.get("state") or "faces",
                      total=ml_progress.get("total", 0),
                      done=ml_progress.get("done", 0),
-                     current=ml_progress.get("current"))
+                     current=ml_progress.get("current"),
+                     error=ml_progress.get("error"))
                 ml_thread.join(timeout=0.5)
+            # The thread can also die mid-pass; without this the loop above just
+            # falls through to "done" and the failure is never reported.
+            if ml_progress.get("state") == "error":
+                _set("error", error=ml_progress.get("error"))
+                return
 
         _set("done")
     except Exception as exc:
@@ -313,12 +347,18 @@ def _ml_consumer(stop: threading.Event) -> None:
     try:
         from . import clipsearch
         from . import faces as faces_mod
+
+        # Running totals per stage. Each cycle only sees the photos pending RIGHT
+        # NOW, so without these the counters restart every pass and the bar jumps
+        # backwards while indexing is still adding photos.
+        faces_done = 0
+        clip_done = 0
         while True:
             _pair_live_photos()
             ml_progress["state"] = "faces"
-            faces_mod.process_pending(ml_progress)
+            faces_done += faces_mod.process_pending(ml_progress, faces_done)
             ml_progress["state"] = "clip"
-            clipsearch.process_pending(ml_progress)
+            clip_done += clipsearch.process_pending(ml_progress, clip_done)
             if stop.is_set():
                 # A photo may have been indexed during the pass we just ran; loop
                 # until a full pass finds nothing left, then we're truly done.
@@ -331,6 +371,10 @@ def _ml_consumer(stop: threading.Event) -> None:
     except Exception as exc:
         traceback.print_exc()
         ml_progress["state"] = "error"
+        # Keep the reason: the mirroring loop in `_run` copies this up to the
+        # top-level status, so a dead ML thread shows the user an error instead
+        # of a progress bar frozen at whatever number it died on.
+        ml_progress["error"] = str(exc)
         print(f"[indexer] ML consumer stopped on error: {exc}")
     finally:
         db.close_conn()
