@@ -117,6 +117,12 @@ It takes a few minutes. **Leave it alone until it says "All set"**, then close i
 If anything goes wrong it tells you what failed and writes the details to
 `setup-log.txt` in this folder.
 
+> **Safe to run again, any time.** Setup skips whatever is already done — a
+> second run takes seconds instead of minutes, and nothing is re-downloaded or
+> reinstalled. It never touches your photos or your library. The one thing it
+> *will* rebuild is Memoria's Python environment, and only if you've changed
+> your Python version since last time (it tells you when it does).
+
 > **If Windows shows a blue "Windows protected your PC" box:** click
 > **More info → Run anyway**. This happens because the file came from the
 > internet and isn't code-signed. (You can read exactly what it does — it's a
@@ -149,6 +155,11 @@ Then Memoria asks you two things:
 
 This is Memoria's private workspace — its catalogue and thumbnail cache. Pick a
 drive with some free space (a large library can use several GB of thumbnails).
+
+Memoria creates a folder called **`MemoriaData`** inside whatever you choose and
+keeps everything in there — so picking `D:\` gives you `D:\MemoriaData`, rather
+than Memoria's files scattered loose across your drive. You can confirm the
+exact path any time under **Settings → Storage**.
 
 ⚠️ **This is not your photo folder.** It's a separate folder Memoria creates for
 itself. It's also the only thing you'd ever need to back up.
@@ -341,7 +352,10 @@ If one is listed but shows as offline, the drive isn't connected.
 1. Download the new version (Step 1).
 2. Extract it to a **new** folder.
 3. Run `setup.cmd` in the new folder.
-4. Point it at the **same data folder** you chose originally.
+4. Point it at the **same data folder** you used before — that's the
+   `MemoriaData` folder itself (e.g. `D:\MemoriaData`, not `D:\`). Memoria
+   recognises an existing library and uses it as-is instead of nesting another
+   folder inside it.
 
 Your library, albums, favourites, names and edits all live in that data folder,
 so they carry across untouched. Once the new version works, you can delete the

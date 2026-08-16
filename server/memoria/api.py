@@ -75,7 +75,10 @@ class SetupBody(BaseModel):
 
 @router.post("/setup")
 def post_setup(body: SetupBody) -> SetupState:
-    config.set_data_dir(body.dataDir)
+    # Nest a MemoriaData/ inside whatever the user picked, unless they picked a
+    # Memoria data folder already — see config.resolve_data_dir. Done here rather
+    # than in the picker so it holds however setup is driven.
+    config.set_data_dir(config.resolve_data_dir(body.dataDir))
     db.init_db()
     return get_setup()
 

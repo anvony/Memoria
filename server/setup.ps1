@@ -19,6 +19,16 @@ param([switch]$SkipML, [switch]$ShowOutput)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+# PowerShell 5.1 inherits .NET's default TLS, which on an unpatched Windows 10
+# can still be TLS 1.0/1.1 — every HTTPS host we fetch from (python.org's CDN,
+# gyan.dev, sourceforge, Microsoft) requires 1.2+. Without this the downloads
+# fail with a bare "connection was closed" that looks like a dead internet
+# connection. Additive, so nothing already enabled is turned off.
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch { }
+
 $appRoot = Split-Path -Parent $PSScriptRoot          # the folder holding Memoria.exe
 $log     = Join-Path $appRoot "setup-log.txt"
 $tools   = Join-Path $PSScriptRoot "tools"
@@ -206,6 +216,41 @@ try {
                   Select-Object -First 1).ToString().Trim()
     } catch { }
     Add-Log "Python on PATH reports version '$pyVer'."
+
+    # setup.cmd's `where python` is satisfied by the Microsoft Store's
+    # app-execution-alias stub, which isn't Python at all -- running it opens the
+    # Store and prints nothing. Stop here with something the user can act on,
+    # rather than failing three stages later inside `python -m venv`.
+    if ($pyVer -notmatch '^3\.\d+$') {
+        throw ("Python on PATH didn't report a version. If Windows opened the " +
+               "Microsoft Store, install Python from python.org instead and tick " +
+               "'Add python.exe to PATH'.")
+    }
+
+    # A .venv built by a DIFFERENT Python is the trap behind "install 3.12 and
+    # run setup again": `python -m venv` reuses an existing folder, rewriting
+    # pyvenv.cfg to point at the new interpreter while leaving site-packages full
+    # of wheels compiled for the old one. Everything then reports "already
+    # satisfied" and the imports fail anyway. Rebuild instead.
+    $venvCfg = Join-Path $PSScriptRoot ".venv\pyvenv.cfg"
+    if (Test-Path $venvCfg) {
+        $venvVer = ""
+        $verLine = Get-Content $venvCfg | Where-Object { $_ -match '^\s*version' } | Select-Object -First 1
+        if ($verLine -match '(\d+\.\d+)') { $venvVer = $Matches[1] }
+        if ($venvVer -and ($venvVer -ne $pyVer)) {
+            Add-Log "Existing .venv was built with Python $venvVer, now running $pyVer - rebuilding it."
+            Write-Note -Text "Your Python changed ($venvVer to $pyVer) - rebuilding Memoria's environment." `
+                       -Colour Yellow -Fraction 0.0 -Label "Rebuilding the environment"
+            try {
+                Remove-Item -Recurse -Force (Join-Path $PSScriptRoot ".venv")
+            } catch {
+                throw ("Couldn't remove the old Python environment (" +
+                       $_.Exception.Message + "). Close Memoria if it's running, " +
+                       "then run setup.cmd again.")
+            }
+        }
+    }
+
     if ($pyVer -and ($pyVer -notin @("3.12", "3.13"))) {
         Write-Note -Text "You have Python $pyVer. Memoria is built and tested on Python 3.12." `
                    -Colour Yellow -Fraction 0.0 -Label "Checking Python"
@@ -388,8 +433,13 @@ try {
     # or data folder to exist yet.
     $script:Stage = "Checking the installation"
     try {
+        # __import__('memoria.api') rather than "import memoria.api": Start-Process
+        # joins -ArgumentList with spaces and does NOT quote the parts, so an
+        # argument containing a space arrives at the program split in two. Python
+        # received `-c import` and choked. Keeping every argument space-free means
+        # the quoting rules can never bite again.
         Invoke-Logged -FilePath ".\.venv\Scripts\python.exe" `
-            -Arguments @("-c", "import memoria.api") `
+            -Arguments @("-c", "__import__('memoria.api')") `
             -Label "Checking the installation" -From 0.99 -To 1.0 -ExpectSec 8
         Add-Log "Import check passed - the engine starts."
     } catch {
@@ -438,8 +488,13 @@ try {
     # "Requirement already satisfied" with the one line that matters scrolled off.
     try {
         $lines = Get-Content $log -ErrorAction SilentlyContinue
+        # Import failures from the final check are the whole point of that stage,
+        # so they have to survive this filter: a SyntaxError or ModuleNotFoundError
+        # line starts with neither ERROR nor Traceback.
         $errors = $lines | Where-Object {
-            $_ -match '^\s*(ERROR|error:|FATAL|Traceback)' -or $_ -match 'No matching distribution'
+            $_ -match '^\s*(ERROR|error:|FATAL|Traceback)' -or
+            $_ -match 'No matching distribution' -or
+            $_ -match '(SyntaxError|ModuleNotFoundError|ImportError|DLL load failed)'
         } | Select-Object -Last 6
         if ($errors) {
             Write-Host "  What went wrong:" -ForegroundColor DarkGray

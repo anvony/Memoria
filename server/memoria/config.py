@@ -44,6 +44,31 @@ def get_data_dir() -> Path | None:
     return Path(raw) if raw else None
 
 
+DATA_DIR_NAME = "MemoriaData"
+
+
+def resolve_data_dir(chosen: str | Path) -> Path:
+    """Where the data should actually live, given the folder the user picked.
+
+    People pick drive roots — `C:\\` or `D:\\` — and writing memoria.db, thumbs/
+    and models/ straight into one scatters our files through a folder that isn't
+    ours. So unless the pick already IS a Memoria data folder, nest a
+    MemoriaData/ inside it and use that.
+
+    Two cases pass through untouched, and both are the "point it at my existing
+    library" flow the README describes for upgrading:
+      - the folder already contains a memoria.db, or
+      - the folder is already called MemoriaData.
+    Without those exceptions, re-selecting an existing library would bury it one
+    level deeper on every upgrade."""
+    chosen = Path(chosen)
+    if (chosen / "memoria.db").exists():
+        return chosen
+    if chosen.name.lower() == DATA_DIR_NAME.lower():
+        return chosen
+    return chosen / DATA_DIR_NAME
+
+
 def set_data_dir(path: str | Path) -> Path:
     data_dir = Path(path)
     data_dir.mkdir(parents=True, exist_ok=True)
