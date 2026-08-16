@@ -38,10 +38,39 @@ def save_config(config: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
-def get_data_dir() -> Path | None:
-    """The configured data directory, or None if first-run setup hasn't happened."""
+def remembered_data_dir() -> Path | None:
+    """The data directory recorded in the pointer file, whether or not it still
+    exists. `get_data_dir` deliberately hides a folder that's gone; this is for
+    telling the user where it used to be."""
     raw = load_config().get("data_dir")
     return Path(raw) if raw else None
+
+
+def get_data_dir() -> Path | None:
+    """The configured data directory — or None if first-run setup hasn't
+    happened, OR the folder it points at no longer exists.
+
+    Treating a vanished folder as "not set up" is deliberate. The pointer file
+    outlives the data it points at: the user can delete the folder, or the drive
+    it lived on can be unplugged. Without this check the app doesn't merely
+    misbehave, it refuses to start — `db.init_db()` runs during FastAPI's
+    lifespan and sqlite3 raises "unable to open database file" against the
+    missing path, so startup fails and the process exits before serving anything.
+    There's then no way back: the first-run screen that would fix it is behind a
+    server that won't boot.
+
+    Everything downstream already keys off None (main.lifespan skips init_db,
+    _require_setup 503s, /setup reports configured=false), so returning None here
+    lands the user on the first-run screen — the state they'd be in with a fresh
+    install, which is the only sane place to recover from.
+
+    The recorded path is NOT erased (see `remembered_data_dir`), so first-run can
+    offer it straight back: reconnect the drive, click through, and nothing was
+    lost."""
+    path = remembered_data_dir()
+    if path is None or not path.is_dir():
+        return None
+    return path
 
 
 DATA_DIR_NAME = "MemoriaData"

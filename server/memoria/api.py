@@ -62,10 +62,16 @@ def health() -> dict:
 @router.get("/setup")
 def get_setup() -> SetupState:
     data_dir = config.get_data_dir()
+    # When the configured folder has gone missing, offer the old path back as the
+    # default rather than a generic suggestion: the usual cause is an unplugged
+    # drive, and pre-filling it turns recovery into one click instead of asking
+    # the user to remember where their library lived.
+    remembered = config.remembered_data_dir()
+    default = remembered if (data_dir is None and remembered is not None) else config.DEFAULT_DATA_DIR
     return SetupState(
         configured=data_dir is not None,
         data_dir=str(data_dir) if data_dir else None,
-        default_data_dir=str(config.DEFAULT_DATA_DIR),
+        default_data_dir=str(default),
     )
 
 
